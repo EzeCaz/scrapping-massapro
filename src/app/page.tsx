@@ -73,6 +73,7 @@ interface ScrapingConfig {
   depth: number;
   fetcher: 'basic' | 'stealthy' | 'dynamic';
   domains: string[];
+  fetchDetails: boolean;
 }
 
 interface BusinessResult {
@@ -86,6 +87,7 @@ interface BusinessResult {
   email: string;
   source: string;
   source_url: string;
+  priority_score?: number;
 }
 
 interface GenericResult {
@@ -178,8 +180,10 @@ export default function Home() {
     depth: 0,
     fetcher: 'dynamic',
     domains: [],
+    fetchDetails: true,
   });
   const [domainInput, setDomainInput] = useState('');
+  const [statusMessage, setStatusMessage] = useState('');
   const [result, setResult] = useState<ScrapeResponse | null>(null);
   const [scrapeHistory, setScrapeHistory] = useState<
     { timestamp: string; config: ScrapingConfig; result: ScrapeResponse }[]
@@ -206,54 +210,83 @@ export default function Home() {
     setLoading(true);
     setProgress(0);
     setResult(null);
+    setStatusMessage('Starting scraper...');
     setActiveTab('results');
 
-    // Simulate progress
-    const progressInterval = setInterval(() => {
-      setProgress((prev) => {
-        if (prev >= 90) {
-          clearInterval(progressInterval);
-          return 90;
-        }
-        return prev + Math.random() * 15;
-      });
-    }, 500);
-
     try {
-      const response = await fetch('/api/scrape', {
+      // Start the async job
+      const startResponse = await fetch('/api/scrape', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config),
       });
 
-      const data: ScrapeResponse = await response.json();
-      setResult(data);
+      const startData = await startResponse.json();
 
-      if (data.success) {
-        setScrapeHistory((prev) => [
-          { timestamp: new Date().toISOString(), config: { ...config }, result: data },
-          ...prev,
-        ]);
-        toast({
-          title: 'Scraping complete!',
-          description: `Found ${data.results?.length || data.emails?.length || 0} results`,
-        });
-      } else {
-        toast({
-          title: 'Scraping failed',
-          description: data.error || 'Unknown error',
-          variant: 'destructive',
-        });
+      if (!startData.success || !startData.jobId) {
+        setResult({ success: false, error: startData.error || 'Failed to start scraping job' });
+        setLoading(false);
+        return;
       }
+
+      const jobId = startData.jobId;
+
+      // Poll for progress
+      const pollInterval = setInterval(async () => {
+        try {
+          const pollResponse = await fetch(`/api/scrape?jobId=${jobId}`);
+          const pollData = await pollResponse.json();
+
+          if (pollData.progress !== undefined) {
+            setProgress(pollData.progress);
+          }
+          if (pollData.message) {
+            setStatusMessage(pollData.message);
+          }
+
+          if (pollData.status === 'completed') {
+            clearInterval(pollInterval);
+            setResult(pollData.result);
+            setProgress(100);
+            setLoading(false);
+
+            if (pollData.result?.success) {
+              setScrapeHistory((prev) => [
+                { timestamp: new Date().toISOString(), config: { ...config }, result: pollData.result },
+                ...prev,
+              ]);
+              toast({
+                title: 'Scraping complete!',
+                description: `Found ${pollData.result.results?.length || pollData.result.emails?.length || 0} results`,
+              });
+            } else {
+              toast({
+                title: 'Scraping completed with issues',
+                description: pollData.result?.error || 'No results found',
+                variant: 'destructive',
+              });
+            }
+          } else if (pollData.status === 'failed') {
+            clearInterval(pollInterval);
+            setResult({ success: false, error: pollData.error || 'Scraping failed' });
+            setProgress(0);
+            setLoading(false);
+            toast({
+              title: 'Scraping failed',
+              description: pollData.error || 'Unknown error',
+              variant: 'destructive',
+            });
+          }
+        } catch {
+          // Polling error, continue
+        }
+      }, 2000);
     } catch (error) {
       toast({
         title: 'Error',
         description: error instanceof Error ? error.message : 'Failed to scrape',
         variant: 'destructive',
       });
-    } finally {
-      clearInterval(progressInterval);
-      setProgress(100);
       setLoading(false);
     }
   }, [config, toast]);
@@ -348,9 +381,9 @@ export default function Home() {
 
   // Count stats
   const totalEmails =
-    result?.emails?.length || result?.page_emails?.length || 0;
+    result?.emails?.length || result?.results?.filter(r => r.email).length || result?.page_emails?.length || 0;
   const totalPhones =
-    result?.phones?.length || result?.page_phones?.length || 0;
+    result?.phones?.length || result?.results?.filter(r => r.phone).length || result?.page_phones?.length || 0;
   const totalResults = result?.results?.length || result?.page_details?.length || 0;
   const totalSocial = Object.values(result?.social_links || {}).reduce(
     (sum, links) => sum + links.length,
@@ -593,22 +626,42 @@ export default function Home() {
                   </CardHeader>
                   <CardContent className="space-y-4">
                     {config.type === 'google-maps' && (
-                      <div className="space-y-2">
-                        <Label htmlFor="maxResults">Max Results</Label>
-                        <Input
-                          id="maxResults"
-                          type="number"
-                          min={1}
-                          max={100}
-                          value={config.maxResults}
-                          onChange={(e) =>
-                            setConfig((prev) => ({
-                              ...prev,
-                              maxResults: parseInt(e.target.value) || 20,
-                            }))
-                          }
-                        />
-                      </div>
+                      <>
+                        <div className="space-y-2">
+                          <Label htmlFor="maxResults">Max Results</Label>
+                          <Input
+                            id="maxResults"
+                            type="number"
+                            min={1}
+                            max={100}
+                            value={config.maxResults}
+                            onChange={(e) =>
+                              setConfig((prev) => ({
+                                ...prev,
+                                maxResults: parseInt(e.target.value) || 20,
+                              }))
+                            }
+                          />
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <Label htmlFor="fetchDetails">Fetch Details</Label>
+                            <p className="text-xs text-muted-foreground">
+                              Visit each business page for phone, website &amp; email
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <Badge variant="secondary" className="text-xs">Recommended</Badge>
+                            <Switch
+                              id="fetchDetails"
+                              checked={config.fetchDetails}
+                              onCheckedChange={(checked) =>
+                                setConfig((prev) => ({ ...prev, fetchDetails: checked }))
+                              }
+                            />
+                          </div>
+                        </div>
+                      </>
                     )}
 
                     {config.type === 'search' && (
@@ -725,12 +778,12 @@ export default function Home() {
                 <CardContent className="pt-6">
                   <div className="space-y-3">
                     <div className="flex items-center justify-between text-sm">
-                      <span className="text-muted-foreground">Scraping in progress...</span>
+                      <span className="text-muted-foreground">{statusMessage || 'Scraping in progress...'}</span>
                       <span className="font-medium">{Math.round(progress)}%</span>
                     </div>
                     <Progress value={progress} className="h-2" />
                     <p className="text-xs text-muted-foreground">
-                      This may take up to 2 minutes depending on the target site and fetcher type.
+                      Fetching business details and emails. This may take a few minutes...
                     </p>
                   </div>
                 </CardContent>
@@ -834,6 +887,7 @@ export default function Home() {
                               <TableHead>Rating</TableHead>
                               <TableHead>Category</TableHead>
                               <TableHead>Website</TableHead>
+                              <TableHead>Score</TableHead>
                             </TableRow>
                           </TableHeader>
                           <TableBody>
@@ -896,6 +950,18 @@ export default function Home() {
                                       <ExternalLink className="h-3 w-3" />
                                       Visit
                                     </a>
+                                  ) : (
+                                    '—'
+                                  )}
+                                </TableCell>
+                                <TableCell>
+                                  {(biz as any).priority_score !== undefined ? (
+                                    <Badge
+                                      variant={(biz as any).priority_score >= 100 ? 'default' : (biz as any).priority_score >= 50 ? 'secondary' : 'outline'}
+                                      className="text-xs"
+                                    >
+                                      {(biz as any).priority_score}
+                                    </Badge>
                                   ) : (
                                     '—'
                                   )}
