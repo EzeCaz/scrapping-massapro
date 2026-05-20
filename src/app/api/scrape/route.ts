@@ -1,9 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { spawn } from 'child_process';
 import path from 'path';
+import fs from 'fs';
 
 const PYTHON_PATH = '/home/z/my-project/scrapling_env/bin/python3.12';
 const SCRIPTS_DIR = '/home/z/my-project/scraping-scripts';
+const LOG_DIR = '/home/z/my-project/download/scraper-logs';
+
+// Ensure log directory exists
+try {
+  if (!fs.existsSync(LOG_DIR)) {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+  }
+} catch {}
 
 // In-memory job store for async scraping
 interface ScrapeJob {
@@ -15,6 +24,7 @@ interface ScrapeJob {
   result: any;
   error: string;
   startedAt: number;
+  pid?: number;
 }
 
 const jobs = new Map<string, ScrapeJob>();
@@ -69,7 +79,6 @@ export async function POST(request: NextRequest) {
           '--max-results', String(maxResults || 20),
           '--fetcher', fetcher || 'dynamic',
         ];
-        // Default fetchDetails to true unless explicitly set to false
         if (fetchDetails === false) {
           args.push('--no-details');
         }
@@ -128,15 +137,33 @@ export async function POST(request: NextRequest) {
     };
     jobs.set(jobId, job);
 
-    // Spawn Python process asynchronously
+    // Spawn Python process with detached mode to survive Next.js hot reloads
     const scriptPath = path.join(SCRIPTS_DIR, scriptName);
+
+    // Verify the script exists before spawning
+    if (!fs.existsSync(scriptPath)) {
+      job.status = 'failed';
+      job.error = `Scraper script not found: ${scriptPath}`;
+      return NextResponse.json({
+        success: true,
+        jobId,
+        message: 'Scraping job started',
+      });
+    }
+
     const proc = spawn(PYTHON_PATH, [scriptPath, ...args], {
       timeout: 300000, // 5 minute timeout
+      detached: false, // Keep attached so we can capture output
       env: {
         ...process.env,
         PLAYWRIGHT_BROWSERS_PATH: '/home/z/.cache/ms-playwright',
+        PYTHONPATH: '/home/z/my-project/scrapling_env/lib/python3.12/site-packages',
+        PYTHONUNBUFFERED: '1', // Force unbuffered output for real-time progress
       },
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
+
+    job.pid = proc.pid;
 
     let stdout = '';
     let stderr = '';
@@ -167,7 +194,7 @@ export async function POST(request: NextRequest) {
       const chunk = data.toString();
       stderr += chunk;
 
-      // Also parse progress messages from stderr (some Python output goes there)
+      // Also parse progress messages from stderr
       const lines = chunk.split('\n');
       for (const line of lines) {
         try {
@@ -185,7 +212,42 @@ export async function POST(request: NextRequest) {
       }
     });
 
-    proc.on('close', (code: number) => {
+    proc.on('close', (code: number | null, signal: string | null) => {
+      // Save full logs for debugging
+      try {
+        const logFile = path.join(LOG_DIR, `${jobId}.log`);
+        fs.writeFileSync(logFile, JSON.stringify({
+          jobId,
+          code,
+          signal,
+          stdout: stdout.slice(-5000),
+          stderr: stderr.slice(-5000),
+          timestamp: new Date().toISOString(),
+        }, null, 2));
+      } catch {}
+
+      // Check if process was killed by signal
+      if (signal) {
+        job.status = 'failed';
+        const signalNames: Record<string, string> = {
+          'SIGINT': 'Process was interrupted (SIGINT). This usually happens when the server restarts during scraping.',
+          'SIGTERM': 'Process was terminated (SIGTERM). The server may have killed the scraper process.',
+          'SIGKILL': 'Process was killed (SIGKILL). This may be due to memory limits or server resource constraints.',
+          'SIGHUP': 'Process hung up (SIGHUP). The parent process may have exited.',
+        };
+        job.error = signalNames[signal] || `Process was killed by signal: ${signal}`;
+
+        // Append stderr for more context
+        const stdErrLines = stderr.trim().split('\n')
+          .filter(l => l.trim() && !l.trim().startsWith('{'))
+          .filter(l => !l.includes('[INFO]') && !l.includes('Fetched'))
+          .slice(-3);
+        if (stdErrLines.length > 0) {
+          job.error += `\n\nDetails:\n${stdErrLines.join('\n')}`;
+        }
+        return;
+      }
+
       if (code === 0) {
         try {
           // Strategy 1: Look for ===RESULT=== marker and parse JSON after it
@@ -194,7 +256,6 @@ export async function POST(request: NextRequest) {
 
           if (markerIdx >= 0) {
             const afterMarker = stdout.substring(markerIdx + resultMarker.length).trim();
-            // The JSON starts after the marker
             const jsonStart = afterMarker.indexOf('{');
             if (jsonStart >= 0) {
               const jsonStr = afterMarker.substring(jsonStart);
@@ -226,7 +287,7 @@ export async function POST(request: NextRequest) {
                   break;
                 }
               } catch {
-                // Not a valid JSON result, might be a progress message
+                // Not a valid JSON result
               }
             }
           }
@@ -236,7 +297,7 @@ export async function POST(request: NextRequest) {
             job.status = 'completed';
             job.progress = 100;
           } else {
-            // Strategy 3: Try to find JSON anywhere in the combined output
+            // Strategy 3: Try to find JSON in combined output
             const combined = stdout + '\n' + stderr;
             const combinedLines = combined.trim().split('\n');
 
@@ -256,10 +317,9 @@ export async function POST(request: NextRequest) {
             }
 
             job.status = 'failed';
-            job.error = `Failed to parse scraper output: ${stdout.slice(0, 500)}`;
+            job.error = `Failed to parse scraper output. The scraper may have crashed. Output: ${stdout.slice(-300)}`;
           }
         } catch {
-          // If JSON parsing fails, try stderr
           try {
             const stderrLines = stderr.trim().split('\n');
             let lastJson = '';
@@ -281,25 +341,74 @@ export async function POST(request: NextRequest) {
               job.progress = 100;
             } else {
               job.status = 'failed';
-              job.error = `Failed to parse scraper output: ${stdout.slice(0, 500)}`;
+              job.error = `Failed to parse scraper output. Stderr: ${stderr.slice(-300)}`;
             }
           } catch {
             job.status = 'failed';
-            job.error = `Failed to parse scraper output: ${stdout.slice(0, 500)}`;
+            job.error = `Failed to parse scraper output. Raw: ${stdout.slice(-300)}`;
           }
         }
       } else {
         job.status = 'failed';
-        // Try to extract a meaningful error from stderr
-        const errorLines = stderr.trim().split('\n').filter(l => !l.trim().startsWith('{'));
-        const errorMsg = errorLines.slice(-3).join('\n') || `Script exited with code ${code}`;
-        job.error = errorMsg;
+
+        // Build a meaningful error message
+        const errorParts: string[] = [];
+
+        // Exit code explanation
+        const exitCodeMessages: Record<number, string> = {
+          1: 'General error — the scraper encountered an exception.',
+          2: 'Misuse of shell builtins — check the scraper arguments.',
+          126: 'Permission denied — the Python script may not be executable.',
+          127: 'Command not found — the Python interpreter may not be at the expected path.',
+          128: 'Invalid argument to exit.',
+          130: 'Script was interrupted (Ctrl+C / SIGINT).',
+          137: 'Script was killed (SIGKILL) — possibly by the OS due to memory limits.',
+          143: 'Script was terminated (SIGTERM).',
+        };
+
+        if (code && exitCodeMessages[code]) {
+          errorParts.push(exitCodeMessages[code]);
+        } else {
+          errorParts.push(`Script exited with code ${code}`);
+        }
+
+        // Extract meaningful lines from stderr
+        const stdErrLines = stderr.trim().split('\n')
+          .filter(l => l.trim())
+          .filter(l => !l.trim().startsWith('{'))
+          .filter(l => !l.includes('[INFO]') && !l.includes('Fetched (200)') && !l.includes('Fetched (404)'))
+          .slice(-5);
+
+        if (stdErrLines.length > 0) {
+          errorParts.push('Error details:');
+          errorParts.push(...stdErrLines);
+        }
+
+        // Also check stdout for error info
+        if (stdout.includes('Error') || stdout.includes('error') || stdout.includes('Traceback')) {
+          const stdoutErrorLines = stdout.split('\n')
+            .filter(l => l.includes('Error') || l.includes('Traceback') || l.includes('error'))
+            .slice(-3);
+          if (stdoutErrorLines.length > 0 && stdErrLines.length === 0) {
+            errorParts.push('Output errors:');
+            errorParts.push(...stdoutErrorLines);
+          }
+        }
+
+        job.error = errorParts.join('\n');
       }
     });
 
     proc.on('error', (err: Error) => {
       job.status = 'failed';
-      job.error = err.message;
+      // Provide more context for common spawn errors
+      if (err.message.includes('ENOENT')) {
+        job.error = `Python interpreter not found at: ${PYTHON_PATH}. Please verify the installation path.`;
+      } else if (err.message.includes('EACCES')) {
+        job.error = `Permission denied when trying to execute: ${PYTHON_PATH}`;
+      } else {
+        job.error = `Failed to start scraper: ${err.message}`;
+      }
     });
 
     // Return the job ID immediately
