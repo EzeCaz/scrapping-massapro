@@ -1,9 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -29,4 +26,23 @@ model Post {
   authorId  String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+model Lead {
+  id            String   @id @default(cuid())
+  name          String
+  address       String   @default("")
+  phone         String   @default("")
+  website       String   @default("")
+  email         String   @default("")
+  rating        String   @default("")
+  reviewsCount  String   @default("")
+  category      String   @default("")
+  source        String   @default("Google Maps")
+  sourceUrl     String   @default("")
+  priorityScore Int      @default(0)
+  notes         String   @default("")
+  status        String   @default("new")
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   Search,
   MapPin,
@@ -23,6 +23,13 @@ import {
   Trash2,
   Copy,
   Check,
+  ListChecks,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+  Filter,
+  Sheet,
+  Plus,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -61,6 +68,7 @@ import {
   AccordionTrigger,
 } from '@/components/ui/accordion';
 import { Switch } from '@/components/ui/switch';
+import { Checkbox } from '@/components/ui/checkbox';
 import { useToast } from '@/hooks/use-toast';
 
 // Types
@@ -126,6 +134,28 @@ interface DomainOption {
   description: string;
 }
 
+interface Lead {
+  id: string;
+  name: string;
+  address: string;
+  phone: string;
+  website: string;
+  email: string;
+  rating: string;
+  reviewsCount: string;
+  category: string;
+  source: string;
+  sourceUrl: string;
+  priorityScore: number;
+  notes: string;
+  status: 'new' | 'contacted' | 'qualified' | 'lost';
+  createdAt: string;
+  updatedAt: string;
+}
+
+type LeadSortField = 'name' | 'email' | 'phone' | 'address' | 'category' | 'status' | 'priorityScore' | 'createdAt' | 'updatedAt';
+type SortOrder = 'asc' | 'desc';
+
 const DOMAIN_OPTIONS: DomainOption[] = [
   {
     value: 'google-maps',
@@ -165,6 +195,13 @@ const FETCHER_INFO = {
   },
 };
 
+const STATUS_COLORS: Record<string, string> = {
+  new: 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400',
+  contacted: 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400',
+  qualified: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400',
+  lost: 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400',
+};
+
 export default function Home() {
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState('config');
@@ -189,6 +226,52 @@ export default function Home() {
     { timestamp: string; config: ScrapingConfig; result: ScrapeResponse }[]
   >([]);
 
+  // Lead selection on Results tab
+  const [selectedResultIndexes, setSelectedResultIndexes] = useState<Set<number>>(new Set());
+  const [addingToLeads, setAddingToLeads] = useState(false);
+
+  // Lead List state
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [leadsLoading, setLeadsLoading] = useState(false);
+  const [leadSortBy, setLeadSortBy] = useState<LeadSortField>('createdAt');
+  const [leadSortOrder, setLeadSortOrder] = useState<SortOrder>('desc');
+  const [leadSearchFilter, setLeadSearchFilter] = useState('');
+  const [leadStatusFilter, setLeadStatusFilter] = useState<string>('all');
+  const [leadCategoryFilter, setLeadCategoryFilter] = useState('');
+  const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(new Set());
+  const [deletingLeads, setDeletingLeads] = useState(false);
+
+  // Fetch leads when Lead List tab is selected
+  const fetchLeads = useCallback(async () => {
+    setLeadsLoading(true);
+    try {
+      const params = new URLSearchParams();
+      params.set('sortBy', leadSortBy);
+      params.set('sortOrder', leadSortOrder);
+      if (leadStatusFilter && leadStatusFilter !== 'all') params.set('status', leadStatusFilter);
+      if (leadSearchFilter) params.set('search', leadSearchFilter);
+      if (leadCategoryFilter) params.set('category', leadCategoryFilter);
+
+      const res = await fetch(`/api/leads?${params.toString()}`);
+      const data = await res.json();
+      if (data.success) {
+        setLeads(data.leads);
+      } else {
+        toast({ title: 'Error loading leads', description: data.error, variant: 'destructive' });
+      }
+    } catch {
+      toast({ title: 'Error', description: 'Failed to load leads', variant: 'destructive' });
+    } finally {
+      setLeadsLoading(false);
+    }
+  }, [leadSortBy, leadSortOrder, leadStatusFilter, leadSearchFilter, leadCategoryFilter, toast]);
+
+  useEffect(() => {
+    if (activeTab === 'leads') {
+      fetchLeads();
+    }
+  }, [activeTab, leadSortBy, leadSortOrder, leadStatusFilter, leadSearchFilter, leadCategoryFilter, fetchLeads]);
+
   const handleScrape = useCallback(async () => {
     if (config.type !== 'generic' && !config.query.trim()) {
       toast({
@@ -210,6 +293,7 @@ export default function Home() {
     setLoading(true);
     setProgress(0);
     setResult(null);
+    setSelectedResultIndexes(new Set());
     setStatusMessage('Starting scraper...');
     setActiveTab('results');
 
@@ -377,7 +461,239 @@ export default function Home() {
   const clearResults = useCallback(() => {
     setResult(null);
     setProgress(0);
+    setSelectedResultIndexes(new Set());
   }, []);
+
+  // Toggle result row selection
+  const toggleResultSelection = useCallback((index: number) => {
+    setSelectedResultIndexes((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleAllResults = useCallback(() => {
+    if (!result?.results) return;
+    if (selectedResultIndexes.size === result.results.length) {
+      setSelectedResultIndexes(new Set());
+    } else {
+      setSelectedResultIndexes(new Set(result.results.map((_, i) => i)));
+    }
+  }, [result?.results, selectedResultIndexes.size]);
+
+  // Add selected results to Lead List
+  const addSelectedToLeads = useCallback(async () => {
+    if (!result?.results || selectedResultIndexes.size === 0) return;
+    setAddingToLeads(true);
+    try {
+      const selectedLeads = Array.from(selectedResultIndexes).map((i) => result.results![i]);
+      const res = await fetch('/api/leads', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ leads: selectedLeads }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast({
+          title: 'Leads added!',
+          description: `${data.created} lead(s) added, ${data.skipped} duplicate(s) skipped.`,
+        });
+        setSelectedResultIndexes(new Set());
+      } else {
+        toast({ title: 'Error', description: data.error, variant: 'destructive' });
+      }
+    } catch {
+      toast({ title: 'Error', description: 'Failed to add leads', variant: 'destructive' });
+    } finally {
+      setAddingToLeads(false);
+    }
+  }, [result?.results, selectedResultIndexes, toast]);
+
+  // Toggle lead selection
+  const toggleLeadSelection = useCallback((id: string) => {
+    setSelectedLeadIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleAllLeads = useCallback(() => {
+    if (selectedLeadIds.size === leads.length) {
+      setSelectedLeadIds(new Set());
+    } else {
+      setSelectedLeadIds(new Set(leads.map((l) => l.id)));
+    }
+  }, [leads, selectedLeadIds.size]);
+
+  // Delete selected leads
+  const deleteSelectedLeads = useCallback(async () => {
+    if (selectedLeadIds.size === 0) return;
+    setDeletingLeads(true);
+    try {
+      const res = await fetch('/api/leads', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: Array.from(selectedLeadIds) }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        toast({ title: 'Leads deleted', description: `${data.deleted} lead(s) deleted.` });
+        setSelectedLeadIds(new Set());
+        fetchLeads();
+      } else {
+        toast({ title: 'Error', description: data.error, variant: 'destructive' });
+      }
+    } catch {
+      toast({ title: 'Error', description: 'Failed to delete leads', variant: 'destructive' });
+    } finally {
+      setDeletingLeads(false);
+    }
+  }, [selectedLeadIds, toast, fetchLeads]);
+
+  // Update lead status
+  const updateLeadStatus = useCallback(async (id: string, status: string) => {
+    try {
+      const res = await fetch('/api/leads', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, status }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setLeads((prev) => prev.map((l) => (l.id === id ? { ...l, status: status as Lead['status'] } : l)));
+        toast({ title: 'Status updated', description: `Lead status changed to ${status}.` });
+      } else {
+        toast({ title: 'Error', description: data.error, variant: 'destructive' });
+      }
+    } catch {
+      toast({ title: 'Error', description: 'Failed to update lead', variant: 'destructive' });
+    }
+  }, [toast]);
+
+  // Sort handler
+  const handleLeadSort = useCallback((field: LeadSortField) => {
+    setLeadSortBy((prev) => {
+      if (prev === field) {
+        setLeadSortOrder((o) => (o === 'asc' ? 'desc' : 'asc'));
+      } else {
+        setLeadSortOrder('asc');
+      }
+      return field;
+    });
+  }, []);
+
+  // Export leads as CSV
+  const exportLeadsCSV = useCallback((leadsToExport: Lead[]) => {
+    const headers = ['Name', 'Address', 'Phone', 'Email', 'Website', 'Rating', 'Reviews', 'Category', 'Status', 'Priority Score', 'Source', 'Notes', 'Created At'];
+    let csv = headers.join(',') + '\n';
+    csv += leadsToExport
+      .map((l) =>
+        [
+          `"${(l.name || '').replace(/"/g, '""')}"`,
+          `"${(l.address || '').replace(/"/g, '""')}"`,
+          `"${(l.phone || '').replace(/"/g, '""')}"`,
+          `"${(l.email || '').replace(/"/g, '""')}"`,
+          `"${(l.website || '').replace(/"/g, '""')}"`,
+          l.rating || '',
+          `"${(l.reviewsCount || '').replace(/"/g, '""')}"`,
+          `"${(l.category || '').replace(/"/g, '""')}"`,
+          l.status || '',
+          l.priorityScore || 0,
+          `"${(l.source || '').replace(/"/g, '""')}"`,
+          `"${(l.notes || '').replace(/"/g, '""')}"`,
+          l.createdAt || '',
+        ].join(',')
+      )
+      .join('\n');
+
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `leads-${Date.now()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast({ title: 'CSV exported', description: `${leadsToExport.length} lead(s) exported.` });
+  }, [toast]);
+
+  // Export leads as JSON
+  const exportLeadsJSON = useCallback((leadsToExport: Lead[]) => {
+    const blob = new Blob([JSON.stringify(leadsToExport, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `leads-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast({ title: 'JSON exported', description: `${leadsToExport.length} lead(s) exported.` });
+  }, [toast]);
+
+  // Open in Google Sheets
+  const openInGoogleSheets = useCallback((leadsToExport: Lead[]) => {
+    // Export CSV first, then open Google Sheets with instructions
+    const headers = ['Name', 'Address', 'Phone', 'Email', 'Website', 'Rating', 'Reviews', 'Category', 'Status', 'Priority Score', 'Source', 'Notes'];
+    let tsv = headers.join('\t') + '\n';
+    tsv += leadsToExport
+      .map((l) =>
+        [
+          l.name || '',
+          l.address || '',
+          l.phone || '',
+          l.email || '',
+          l.website || '',
+          l.rating || '',
+          l.reviewsCount || '',
+          l.category || '',
+          l.status || '',
+          l.priorityScore || 0,
+          l.source || '',
+          l.notes || '',
+        ]
+          .map((v) => String(v).replace(/\t/g, ' '))
+          .join('\t')
+      )
+      .join('\n');
+
+    // Copy TSV to clipboard and open Google Sheets
+    navigator.clipboard.writeText(tsv).then(() => {
+      window.open('https://docs.google.com/spreadsheets/create', '_blank');
+      toast({
+        title: 'Ready for Google Sheets',
+        description: 'Data copied to clipboard! In Google Sheets, paste (Ctrl+V / Cmd+V) to import.',
+      });
+    });
+  }, [toast]);
+
+  // Get leads to export (selected or all)
+  const getExportLeads = useCallback((): Lead[] => {
+    if (selectedLeadIds.size > 0) {
+      return leads.filter((l) => selectedLeadIds.has(l.id));
+    }
+    return leads;
+  }, [leads, selectedLeadIds]);
+
+  // Sort icon renderer
+  const renderSortIcon = useCallback(
+    (field: LeadSortField) => {
+      if (leadSortBy !== field) return <ArrowUpDown className="ml-1 h-3 w-3 opacity-50" />;
+      return leadSortOrder === 'asc' ? (
+        <ArrowUp className="ml-1 h-3 w-3" />
+      ) : (
+        <ArrowDown className="ml-1 h-3 w-3" />
+      );
+    },
+    [leadSortBy, leadSortOrder]
+  );
 
   // Count stats
   const totalEmails =
@@ -391,7 +707,7 @@ export default function Home() {
   );
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen flex flex-col bg-background">
       {/* Header */}
       <header className="border-b bg-card">
         <div className="container mx-auto px-4 py-4">
@@ -425,12 +741,13 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="container mx-auto px-4 py-6">
+      <main className="container mx-auto px-4 py-6 flex-1">
         <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <TabsList className="grid w-full grid-cols-3 mb-6">
+          <TabsList className="grid w-full grid-cols-4 mb-6">
             <TabsTrigger value="config">
               <Search className="mr-2 h-4 w-4" />
-              Configure Search
+              <span className="hidden sm:inline">Configure Search</span>
+              <span className="sm:hidden">Search</span>
             </TabsTrigger>
             <TabsTrigger value="results">
               <Building2 className="mr-2 h-4 w-4" />
@@ -441,9 +758,19 @@ export default function Home() {
                 </Badge>
               )}
             </TabsTrigger>
+            <TabsTrigger value="leads">
+              <ListChecks className="mr-2 h-4 w-4" />
+              Lead List
+              {leads.length > 0 && (
+                <Badge variant="secondary" className="ml-2">
+                  {leads.length}
+                </Badge>
+              )}
+            </TabsTrigger>
             <TabsTrigger value="history">
               <Globe className="mr-2 h-4 w-4" />
-              History
+              <span className="hidden sm:inline">History</span>
+              <span className="sm:hidden">History</span>
               {scrapeHistory.length > 0 && (
                 <Badge variant="secondary" className="ml-2">
                   {scrapeHistory.length}
@@ -866,6 +1193,43 @@ export default function Home() {
                   </Card>
                 </div>
 
+                {/* Add to Lead List Action Bar */}
+                {result.results && result.results.length > 0 && selectedResultIndexes.size > 0 && (
+                  <Card className="border-primary/50 bg-primary/5">
+                    <CardContent className="pt-6">
+                      <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+                        <div className="flex items-center gap-2">
+                          <ListChecks className="h-5 w-5 text-primary" />
+                          <span className="font-medium">
+                            {selectedResultIndexes.size} result(s) selected
+                          </span>
+                        </div>
+                        <div className="flex gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setSelectedResultIndexes(new Set())}
+                          >
+                            Clear Selection
+                          </Button>
+                          <Button
+                            size="sm"
+                            onClick={addSelectedToLeads}
+                            disabled={addingToLeads}
+                          >
+                            {addingToLeads ? (
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            ) : (
+                              <Plus className="mr-2 h-4 w-4" />
+                            )}
+                            Add to Lead List
+                          </Button>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                )}
+
                 {/* Business Results Table (Google Maps) */}
                 {result.results && result.results.length > 0 && (
                   <Card>
@@ -880,6 +1244,16 @@ export default function Home() {
                         <Table>
                           <TableHeader>
                             <TableRow>
+                              <TableHead className="w-12">
+                                <Checkbox
+                                  checked={
+                                    result.results.length > 0 &&
+                                    selectedResultIndexes.size === result.results.length
+                                  }
+                                  onCheckedChange={toggleAllResults}
+                                  aria-label="Select all results"
+                                />
+                              </TableHead>
                               <TableHead className="min-w-[200px]">Name</TableHead>
                               <TableHead className="min-w-[150px]">Address</TableHead>
                               <TableHead>Phone</TableHead>
@@ -892,7 +1266,17 @@ export default function Home() {
                           </TableHeader>
                           <TableBody>
                             {result.results.map((biz, i) => (
-                              <TableRow key={i}>
+                              <TableRow
+                                key={i}
+                                className={selectedResultIndexes.has(i) ? 'bg-primary/5' : ''}
+                              >
+                                <TableCell>
+                                  <Checkbox
+                                    checked={selectedResultIndexes.has(i)}
+                                    onCheckedChange={() => toggleResultSelection(i)}
+                                    aria-label={`Select ${biz.name}`}
+                                  />
+                                </TableCell>
                                 <TableCell className="font-medium">{biz.name || '—'}</TableCell>
                                 <TableCell className="text-sm">{biz.address || '—'}</TableCell>
                                 <TableCell>
@@ -955,12 +1339,12 @@ export default function Home() {
                                   )}
                                 </TableCell>
                                 <TableCell>
-                                  {(biz as any).priority_score !== undefined ? (
+                                  {biz.priority_score !== undefined ? (
                                     <Badge
-                                      variant={(biz as any).priority_score >= 100 ? 'default' : (biz as any).priority_score >= 50 ? 'secondary' : 'outline'}
+                                      variant={biz.priority_score >= 100 ? 'default' : biz.priority_score >= 50 ? 'secondary' : 'outline'}
                                       className="text-xs"
                                     >
-                                      {(biz as any).priority_score}
+                                      {biz.priority_score}
                                     </Badge>
                                   ) : (
                                     '—'
@@ -1258,6 +1642,372 @@ export default function Home() {
                 </CardContent>
               </Card>
             )}
+          </TabsContent>
+
+          {/* ===================== LEAD LIST TAB ===================== */}
+          <TabsContent value="leads" className="space-y-6">
+            {/* Filters Card */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <Filter className="h-5 w-5" />
+                  Filter & Search Leads
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid gap-4 sm:grid-cols-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="lead-search">Search</Label>
+                    <Input
+                      id="lead-search"
+                      placeholder="Search by name, email, phone..."
+                      value={leadSearchFilter}
+                      onChange={(e) => setLeadSearchFilter(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="lead-status-filter">Status</Label>
+                    <Select value={leadStatusFilter} onValueChange={setLeadStatusFilter}>
+                      <SelectTrigger id="lead-status-filter">
+                        <SelectValue placeholder="All statuses" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All Statuses</SelectItem>
+                        <SelectItem value="new">New</SelectItem>
+                        <SelectItem value="contacted">Contacted</SelectItem>
+                        <SelectItem value="qualified">Qualified</SelectItem>
+                        <SelectItem value="lost">Lost</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="lead-category-filter">Category</Label>
+                    <Input
+                      id="lead-category-filter"
+                      placeholder="Filter by category..."
+                      value={leadCategoryFilter}
+                      onChange={(e) => setLeadCategoryFilter(e.target.value)}
+                    />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Bulk Actions */}
+            {selectedLeadIds.size > 0 && (
+              <Card className="border-destructive/50 bg-destructive/5">
+                <CardContent className="pt-6">
+                  <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <div className="flex items-center gap-2">
+                      <ListChecks className="h-5 w-5 text-destructive" />
+                      <span className="font-medium">
+                        {selectedLeadIds.size} lead(s) selected
+                      </span>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setSelectedLeadIds(new Set())}
+                      >
+                        Clear Selection
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={deleteSelectedLeads}
+                        disabled={deletingLeads}
+                      >
+                        {deletingLeads ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : (
+                          <Trash2 className="mr-2 h-4 w-4" />
+                        )}
+                        Delete Selected
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Export Bar for Leads */}
+            {leads.length > 0 && (
+              <Card>
+                <CardContent className="pt-6">
+                  <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+                    <p className="text-sm text-muted-foreground">
+                      {selectedLeadIds.size > 0
+                        ? `Export ${selectedLeadIds.size} selected lead(s)`
+                        : `Export ${leads.length} lead(s)`}
+                    </p>
+                    <div className="flex gap-2 flex-wrap">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => exportLeadsCSV(getExportLeads())}
+                      >
+                        <FileSpreadsheet className="mr-2 h-4 w-4" />
+                        CSV
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => exportLeadsJSON(getExportLeads())}
+                      >
+                        <FileJson className="mr-2 h-4 w-4" />
+                        JSON
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openInGoogleSheets(getExportLeads())}
+                      >
+                        <Sheet className="mr-2 h-4 w-4" />
+                        Google Sheets
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Leads Table */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <ListChecks className="h-5 w-5" />
+                  Saved Leads
+                </CardTitle>
+                <CardDescription>
+                  {leads.length} lead(s) found. Click column headers to sort.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {leadsLoading ? (
+                  <div className="flex items-center justify-center py-12">
+                    <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+                  </div>
+                ) : leads.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-center">
+                    <div className="flex h-16 w-16 items-center justify-center rounded-full bg-muted mb-4">
+                      <ListChecks className="h-8 w-8 text-muted-foreground" />
+                    </div>
+                    <h3 className="text-lg font-semibold">No Leads Yet</h3>
+                    <p className="text-sm text-muted-foreground mt-1 max-w-md">
+                      Select results from scraping and click &ldquo;Add to Lead List&rdquo; to save them here.
+                    </p>
+                    <Button
+                      variant="outline"
+                      className="mt-4"
+                      onClick={() => setActiveTab('results')}
+                    >
+                      Go to Results
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="rounded-md border overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-12">
+                            <Checkbox
+                              checked={leads.length > 0 && selectedLeadIds.size === leads.length}
+                              onCheckedChange={toggleAllLeads}
+                              aria-label="Select all leads"
+                            />
+                          </TableHead>
+                          <TableHead
+                            className="cursor-pointer select-none hover:bg-muted/50"
+                            onClick={() => handleLeadSort('name')}
+                          >
+                            <span className="inline-flex items-center">
+                              Name {renderSortIcon('name')}
+                            </span>
+                          </TableHead>
+                          <TableHead
+                            className="cursor-pointer select-none hover:bg-muted/50"
+                            onClick={() => handleLeadSort('address')}
+                          >
+                            <span className="inline-flex items-center">
+                              Address {renderSortIcon('address')}
+                            </span>
+                          </TableHead>
+                          <TableHead
+                            className="cursor-pointer select-none hover:bg-muted/50"
+                            onClick={() => handleLeadSort('phone')}
+                          >
+                            <span className="inline-flex items-center">
+                              Phone {renderSortIcon('phone')}
+                            </span>
+                          </TableHead>
+                          <TableHead
+                            className="cursor-pointer select-none hover:bg-muted/50"
+                            onClick={() => handleLeadSort('email')}
+                          >
+                            <span className="inline-flex items-center">
+                              Email {renderSortIcon('email')}
+                            </span>
+                          </TableHead>
+                          <TableHead>Rating</TableHead>
+                          <TableHead
+                            className="cursor-pointer select-none hover:bg-muted/50"
+                            onClick={() => handleLeadSort('category')}
+                          >
+                            <span className="inline-flex items-center">
+                              Category {renderSortIcon('category')}
+                            </span>
+                          </TableHead>
+                          <TableHead>Website</TableHead>
+                          <TableHead
+                            className="cursor-pointer select-none hover:bg-muted/50"
+                            onClick={() => handleLeadSort('priorityScore')}
+                          >
+                            <span className="inline-flex items-center">
+                              Score {renderSortIcon('priorityScore')}
+                            </span>
+                          </TableHead>
+                          <TableHead
+                            className="cursor-pointer select-none hover:bg-muted/50"
+                            onClick={() => handleLeadSort('status')}
+                          >
+                            <span className="inline-flex items-center">
+                              Status {renderSortIcon('status')}
+                            </span>
+                          </TableHead>
+                          <TableHead
+                            className="cursor-pointer select-none hover:bg-muted/50"
+                            onClick={() => handleLeadSort('createdAt')}
+                          >
+                            <span className="inline-flex items-center">
+                              Created {renderSortIcon('createdAt')}
+                            </span>
+                          </TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {leads.map((lead) => (
+                          <TableRow
+                            key={lead.id}
+                            className={selectedLeadIds.has(lead.id) ? 'bg-primary/5' : ''}
+                          >
+                            <TableCell>
+                              <Checkbox
+                                checked={selectedLeadIds.has(lead.id)}
+                                onCheckedChange={() => toggleLeadSelection(lead.id)}
+                                aria-label={`Select ${lead.name}`}
+                              />
+                            </TableCell>
+                            <TableCell className="font-medium">{lead.name || '—'}</TableCell>
+                            <TableCell className="text-sm">{lead.address || '—'}</TableCell>
+                            <TableCell>
+                              {lead.phone ? (
+                                <span className="inline-flex items-center gap-1 text-sm">
+                                  <Phone className="h-3 w-3" />
+                                  {lead.phone}
+                                </span>
+                              ) : (
+                                '—'
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {lead.email ? (
+                                <span className="inline-flex items-center gap-1 text-sm">
+                                  <Mail className="h-3 w-3" />
+                                  {lead.email}
+                                </span>
+                              ) : (
+                                '—'
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {lead.rating ? (
+                                <span className="inline-flex items-center gap-1">
+                                  <Star className="h-3 w-3 fill-amber-400 text-amber-400" />
+                                  {lead.rating}
+                                  {lead.reviewsCount && (
+                                    <span className="text-xs text-muted-foreground">
+                                      ({lead.reviewsCount})
+                                    </span>
+                                  )}
+                                </span>
+                              ) : (
+                                '—'
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {lead.category ? (
+                                <Badge variant="secondary" className="text-xs">
+                                  {lead.category}
+                                </Badge>
+                              ) : (
+                                '—'
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {lead.website ? (
+                                <a
+                                  href={lead.website}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+                                >
+                                  <ExternalLink className="h-3 w-3" />
+                                  Visit
+                                </a>
+                              ) : (
+                                '—'
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {lead.priorityScore ? (
+                                <Badge
+                                  variant={lead.priorityScore >= 100 ? 'default' : lead.priorityScore >= 50 ? 'secondary' : 'outline'}
+                                  className="text-xs"
+                                >
+                                  {lead.priorityScore}
+                                </Badge>
+                              ) : (
+                                '—'
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              <Select
+                                value={lead.status}
+                                onValueChange={(value) => updateLeadStatus(lead.id, value)}
+                              >
+                                <SelectTrigger className="h-7 w-[110px] text-xs">
+                                  <Badge className={`text-xs ${STATUS_COLORS[lead.status] || ''}`}>
+                                    {lead.status}
+                                  </Badge>
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="new">
+                                    <Badge className={`text-xs ${STATUS_COLORS.new}`}>new</Badge>
+                                  </SelectItem>
+                                  <SelectItem value="contacted">
+                                    <Badge className={`text-xs ${STATUS_COLORS.contacted}`}>contacted</Badge>
+                                  </SelectItem>
+                                  <SelectItem value="qualified">
+                                    <Badge className={`text-xs ${STATUS_COLORS.qualified}`}>qualified</Badge>
+                                  </SelectItem>
+                                  <SelectItem value="lost">
+                                    <Badge className={`text-xs ${STATUS_COLORS.lost}`}>lost</Badge>
+                                  </SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
+                              {new Date(lead.createdAt).toLocaleDateString()}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           </TabsContent>
 
           {/* ===================== HISTORY TAB ===================== */}
