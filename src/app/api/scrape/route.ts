@@ -3,9 +3,13 @@ import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 
-const PYTHON_PATH = '/home/z/my-project/scrapling_env/bin/python3.12';
-const SCRIPTS_DIR = '/home/z/my-project/scraping-scripts';
-const LOG_DIR = '/home/z/my-project/download/scraper-logs';
+// Resolve paths from environment variables with sensible defaults
+// In dev: paths point to /home/z/my-project/...
+// In production: paths may be different (e.g., /app/... in a container)
+const PROJECT_ROOT = process.env.PROJECT_ROOT || '/home/z/my-project';
+const PYTHON_PATH = process.env.PYTHON_PATH || path.join(PROJECT_ROOT, 'scrapling_env/bin/python3.12');
+const SCRIPTS_DIR = process.env.SCRIPTS_DIR || path.join(PROJECT_ROOT, 'scraping-scripts');
+const LOG_DIR = process.env.LOG_DIR || path.join(PROJECT_ROOT, 'download/scraper-logs');
 
 // Ensure log directory exists
 try {
@@ -142,23 +146,61 @@ export async function POST(request: NextRequest) {
 
     // Verify the script exists before spawning
     if (!fs.existsSync(scriptPath)) {
-      job.status = 'failed';
-      job.error = `Scraper script not found: ${scriptPath}`;
+      // Also try alternative Python interpreter
+      const altPythonPaths = [
+        '/usr/bin/python3',
+        '/usr/local/bin/python3',
+        path.join(PROJECT_ROOT, 'scrapling_env/bin/python3'),
+      ];
+      const pythonExists = fs.existsSync(PYTHON_PATH) || altPythonPaths.some(p => fs.existsSync(p));
+      
+      const errorMsg = pythonExists
+        ? `Scraper script not found: ${scriptPath}. Make sure the scraping-scripts directory is deployed alongside the application.`
+        : `Scraper script not found: ${scriptPath}. Python interpreter also missing at: ${PYTHON_PATH}. Ensure Python and the scraping environment are installed.`;
+      
+      jobs.delete(jobId); // Clean up the failed job
       return NextResponse.json({
-        success: true,
-        jobId,
-        message: 'Scraping job started',
-      });
+        success: false,
+        error: errorMsg,
+      }, { status: 500 });
+    }
+    
+    // Verify Python interpreter exists
+    let resolvedPythonPath = PYTHON_PATH;
+    if (!fs.existsSync(resolvedPythonPath)) {
+      // Try alternative Python paths
+      const altPythonPaths = [
+        path.join(PROJECT_ROOT, 'scrapling_env/bin/python3'),
+        '/home/z/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12',
+        '/home/z/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12',
+        '/usr/bin/python3',
+        '/usr/local/bin/python3',
+      ];
+      for (const altPath of altPythonPaths) {
+        if (fs.existsSync(altPath)) {
+          resolvedPythonPath = altPath;
+          break;
+        }
+      }
+      
+      if (!fs.existsSync(resolvedPythonPath)) {
+        jobs.delete(jobId);
+        return NextResponse.json({
+          success: false,
+          error: `Python interpreter not found. Tried: ${PYTHON_PATH} and alternatives. Ensure Python 3.12+ is installed.`,
+        }, { status: 500 });
+      }
     }
 
-    const proc = spawn(PYTHON_PATH, [scriptPath, ...args], {
+    const proc = spawn(resolvedPythonPath, [scriptPath, ...args], {
       timeout: 300000, // 5 minute timeout
       detached: false, // Keep attached so we can capture output
       env: {
         ...process.env,
-        PLAYWRIGHT_BROWSERS_PATH: '/home/z/.cache/ms-playwright',
-        PYTHONPATH: '/home/z/my-project/scrapling_env/lib/python3.12/site-packages',
+        PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH || '/home/z/.cache/ms-playwright',
+        PYTHONPATH: process.env.PYTHONPATH || path.join(PROJECT_ROOT, 'scrapling_env/lib/python3.12/site-packages'),
         PYTHONUNBUFFERED: '1', // Force unbuffered output for real-time progress
+        PROJECT_ROOT, // Pass project root to Python script
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });

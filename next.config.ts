@@ -7,6 +7,15 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
+  // Exclude heavy directories from file tracing
+  // These contain symlinks that point outside the project root and Python binaries
+  outputFileTracingExcludes: {
+    '*': [
+      'scrapling_env/**/*',
+      'scraping-scripts/**/*',
+      'node_modules/sharp/**/*',
+    ],
+  },
 };
 
 export default nextConfig;
