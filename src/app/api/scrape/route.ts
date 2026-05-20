@@ -132,31 +132,49 @@ export async function POST(request: NextRequest) {
     const scriptPath = path.join(SCRIPTS_DIR, scriptName);
     const proc = spawn(PYTHON_PATH, [scriptPath, ...args], {
       timeout: 300000, // 5 minute timeout
+      env: {
+        ...process.env,
+        PLAYWRIGHT_BROWSERS_PATH: '/home/z/.cache/ms-playwright',
+      },
     });
 
     let stdout = '';
     let stderr = '';
-    let finalResultParsed = false;
 
     proc.stdout.on('data', (data: Buffer) => {
       const chunk = data.toString();
       stdout += chunk;
 
-      // Parse progress messages from stderr (they are printed to stdout by the Python script)
-      // But also check for progress in the accumulated stdout
+      // Parse progress messages from stdout
+      const lines = chunk.split('\n');
+      for (const line of lines) {
+        try {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed === '===RESULT===' || !trimmed.startsWith('{')) continue;
+          const parsed = JSON.parse(trimmed);
+          if (parsed.progress !== undefined && parsed.message !== undefined) {
+            job.progress = parsed.progress;
+            job.message = parsed.message || '';
+            job.detailCount = parsed.detail_count || parsed.detailCount || 0;
+          }
+        } catch {
+          // Not a JSON progress line, ignore
+        }
+      }
     });
 
     proc.stderr.on('data', (data: Buffer) => {
       const chunk = data.toString();
       stderr += chunk;
 
-      // Parse progress messages from Python's print statements
-      // These appear on stderr because Python flushes there
+      // Also parse progress messages from stderr (some Python output goes there)
       const lines = chunk.split('\n');
       for (const line of lines) {
         try {
-          const parsed = JSON.parse(line.trim());
-          if (parsed.progress !== undefined) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed === '===RESULT===' || !trimmed.startsWith('{')) continue;
+          const parsed = JSON.parse(trimmed);
+          if (parsed.progress !== undefined && parsed.message !== undefined) {
             job.progress = parsed.progress;
             job.message = parsed.message || '';
             job.detailCount = parsed.detail_count || parsed.detailCount || 0;
@@ -170,13 +188,34 @@ export async function POST(request: NextRequest) {
     proc.on('close', (code: number) => {
       if (code === 0) {
         try {
-          // Try to parse the final JSON result from stdout
-          // The Python script prints progress to stdout AND the final result
-          // We need to find the last valid JSON object in stdout
+          // Strategy 1: Look for ===RESULT=== marker and parse JSON after it
+          const resultMarker = '===RESULT===';
+          const markerIdx = stdout.indexOf(resultMarker);
+
+          if (markerIdx >= 0) {
+            const afterMarker = stdout.substring(markerIdx + resultMarker.length).trim();
+            // The JSON starts after the marker
+            const jsonStart = afterMarker.indexOf('{');
+            if (jsonStart >= 0) {
+              const jsonStr = afterMarker.substring(jsonStart);
+              try {
+                const parsed = JSON.parse(jsonStr);
+                if (parsed.success !== undefined) {
+                  job.result = parsed;
+                  job.status = 'completed';
+                  job.progress = 100;
+                  return;
+                }
+              } catch {
+                // Try to find the end of valid JSON
+              }
+            }
+          }
+
+          // Strategy 2: Find the last valid JSON with 'success' key in stdout
           const stdoutLines = stdout.trim().split('\n');
           let lastJson = '';
 
-          // Find the last line that parses as a valid JSON with 'success' key
           for (let i = stdoutLines.length - 1; i >= 0; i--) {
             const line = stdoutLines[i].trim();
             if (line.startsWith('{')) {
@@ -194,14 +233,33 @@ export async function POST(request: NextRequest) {
 
           if (lastJson) {
             job.result = JSON.parse(lastJson);
+            job.status = 'completed';
+            job.progress = 100;
           } else {
-            // Try parsing entire stdout
-            job.result = JSON.parse(stdout);
+            // Strategy 3: Try to find JSON anywhere in the combined output
+            const combined = stdout + '\n' + stderr;
+            const combinedLines = combined.trim().split('\n');
+
+            for (let i = combinedLines.length - 1; i >= 0; i--) {
+              const line = combinedLines[i].trim();
+              if (line.startsWith('{')) {
+                try {
+                  const parsed = JSON.parse(line);
+                  if (parsed.success !== undefined && parsed.results !== undefined) {
+                    job.result = parsed;
+                    job.status = 'completed';
+                    job.progress = 100;
+                    return;
+                  }
+                } catch {}
+              }
+            }
+
+            job.status = 'failed';
+            job.error = `Failed to parse scraper output: ${stdout.slice(0, 500)}`;
           }
-          job.status = 'completed';
-          job.progress = 100;
         } catch {
-          // If JSON parsing fails, try to find the result in stderr
+          // If JSON parsing fails, try stderr
           try {
             const stderrLines = stderr.trim().split('\n');
             let lastJson = '';
