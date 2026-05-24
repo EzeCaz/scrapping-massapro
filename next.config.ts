@@ -1,18 +1,21 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: "standalone",
-  /* config options here */
+  // Vercel handles the build output itself, so we don't need "standalone"
+  // For Z.AI container deploys, the build script adds standalone manually
+  output: process.env.VERCEL ? undefined : "standalone",
+
   typescript: {
     ignoreBuildErrors: true,
   },
   reactStrictMode: false,
-  // Exclude heavy directories from file tracing
-  // These contain symlinks that point outside the project root and Python binaries
+
+  // Exclude heavy directories from file tracing (Z.AI container builds)
   outputFileTracingExcludes: {
     '*': [
       'scrapling_env/**/*',
       'scraping-scripts/**/*',
+      'scraper-service/**/*',
       'node_modules/sharp/**/*',
     ],
   },

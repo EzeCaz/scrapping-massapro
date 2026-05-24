@@ -1,34 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { spawn } from 'child_process';
-import path from 'path';
-import fs from 'fs';
 
-// Resolve paths from environment variables with sensible defaults
-// In dev: paths point to /home/z/my-project/...
-// In production: paths may be different (e.g., /app/... in a container)
-const PROJECT_ROOT = process.env.PROJECT_ROOT || '/home/z/my-project';
-const PYTHON_PATH = process.env.PYTHON_PATH || path.join(PROJECT_ROOT, 'scrapling_env/bin/python3.12');
-const SCRIPTS_DIR = process.env.SCRIPTS_DIR || path.join(PROJECT_ROOT, 'scraping-scripts');
-const LOG_DIR = process.env.LOG_DIR || path.join(PROJECT_ROOT, 'download/scraper-logs');
+// Scraper service URL — deployed on Railway/Render separately from Vercel
+const SCRAPER_SERVICE_URL = process.env.SCRAPER_SERVICE_URL || 'http://localhost:8000';
 
-// Ensure log directory exists
-try {
-  if (!fs.existsSync(LOG_DIR)) {
-    fs.mkdirSync(LOG_DIR, { recursive: true });
-  }
-} catch {}
-
-// In-memory job store for async scraping
+// In-memory job store for async scraping (fallback when scraper service is local)
 interface ScrapeJob {
   id: string;
-  status: 'running' | 'completed' | 'failed';
+  status: 'queued' | 'running' | 'completed' | 'failed';
   progress: number;
   message: string;
   detailCount: number;
   result: any;
   error: string;
   startedAt: number;
-  pid?: number;
 }
 
 const jobs = new Map<string, ScrapeJob>();
@@ -37,7 +21,7 @@ const jobs = new Map<string, ScrapeJob>();
 setInterval(() => {
   const now = Date.now();
   for (const [id, job] of jobs) {
-    if (now - job.startedAt > 30 * 60 * 1000) { // 30 min TTL
+    if (now - job.startedAt > 30 * 60 * 1000) {
       jobs.delete(id);
     }
   }
@@ -54,81 +38,107 @@ interface ScrapeRequest {
   fetchDetails?: boolean;
 }
 
-function generateJobId(): string {
-  return `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
 export async function POST(request: NextRequest) {
   try {
     const body: ScrapeRequest = await request.json();
     const { type, query, url, maxResults, maxPages, depth, fetcher, fetchDetails } = body;
 
-    const jobId = generateJobId();
+    // Validate request
+    if (type === 'google-maps' && !query) {
+      return NextResponse.json(
+        { success: false, error: 'Query is required for Google Maps scraping' },
+        { status: 400 }
+      );
+    }
+    if (type === 'generic' && !url) {
+      return NextResponse.json(
+        { success: false, error: 'URL is required for generic scraping' },
+        { status: 400 }
+      );
+    }
+    if (type === 'search' && !query) {
+      return NextResponse.json(
+        { success: false, error: 'Query is required for search scraping' },
+        { status: 400 }
+      );
+    }
 
-    // Build args based on scrape type
+    // --- Mode 1: Call remote scraper service (Vercel → Railway) ---
+    try {
+      const scraperRes = await fetch(`${SCRAPER_SERVICE_URL}/scrape`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type,
+          query,
+          url,
+          maxResults: maxResults || 20,
+          maxPages: maxPages || 5,
+          depth: depth || 0,
+          fetcher: fetcher || 'dynamic',
+          fetchDetails: fetchDetails !== false,
+        }),
+        signal: AbortSignal.timeout(10000), // 10s connection timeout
+      });
+
+      if (scraperRes.ok) {
+        const data = await scraperRes.json();
+        if (data.jobId) {
+          // Also store locally for quick lookup
+          const jobId = data.jobId;
+          jobs.set(jobId, {
+            id: jobId,
+            status: 'running',
+            progress: 0,
+            message: 'Job forwarded to scraper service',
+            detailCount: 0,
+            result: null,
+            error: '',
+            startedAt: Date.now(),
+          });
+          return NextResponse.json({
+            success: true,
+            jobId,
+            message: 'Scraping job started',
+          });
+        }
+      }
+    } catch (fetchErr) {
+      // Remote service unavailable — fall through to local mode
+      console.warn('Scraper service unavailable, falling back to local subprocess:', fetchErr instanceof Error ? fetchErr.message : String(fetchErr));
+    }
+
+    // --- Mode 2: Local subprocess fallback (Z.AI container / dev mode) ---
+    const { spawn } = await import('child_process');
+    const path = await import('path');
+    const fs = await import('fs');
+
+    const PROJECT_ROOT = process.env.PROJECT_ROOT || '/home/z/my-project';
+    const PYTHON_PATH = process.env.PYTHON_PATH || path.join(PROJECT_ROOT, 'scrapling_env/bin/python3.12');
+    const SCRIPTS_DIR = process.env.SCRIPTS_DIR || path.join(PROJECT_ROOT, 'scraping-scripts');
+
     let scriptName: string;
     let args: string[];
 
     switch (type) {
-      case 'google-maps': {
-        if (!query) {
-          return NextResponse.json(
-            { success: false, error: 'Query is required for Google Maps scraping' },
-            { status: 400 }
-          );
-        }
+      case 'google-maps':
         scriptName = 'google_maps_scraper.py';
-        args = [
-          '--query', query,
-          '--max-results', String(maxResults || 20),
-          '--fetcher', fetcher || 'dynamic',
-        ];
-        if (fetchDetails === false) {
-          args.push('--no-details');
-        }
+        args = ['--query', query!, '--max-results', String(maxResults || 20), '--fetcher', fetcher || 'dynamic'];
+        if (fetchDetails === false) args.push('--no-details');
         break;
-      }
-
-      case 'generic': {
-        if (!url) {
-          return NextResponse.json(
-            { success: false, error: 'URL is required for generic scraping' },
-            { status: 400 }
-          );
-        }
+      case 'generic':
         scriptName = 'generic_scraper.py';
-        args = [
-          '--url', url,
-          '--depth', String(depth || 0),
-          '--fetcher', fetcher || 'stealthy',
-        ];
+        args = ['--url', url!, '--depth', String(depth || 0), '--fetcher', fetcher || 'stealthy'];
         break;
-      }
-
-      case 'search': {
-        if (!query) {
-          return NextResponse.json(
-            { success: false, error: 'Query is required for search scraping' },
-            { status: 400 }
-          );
-        }
+      case 'search':
         scriptName = 'search_scraper.py';
-        args = [
-          '--query', query,
-          '--max-pages', String(maxPages || 5),
-          '--fetcher', fetcher || 'stealthy',
-        ];
+        args = ['--query', query!, '--max-pages', String(maxPages || 5), '--fetcher', fetcher || 'stealthy'];
         break;
-      }
-
       default:
-        return NextResponse.json(
-          { success: false, error: 'Invalid scrape type' },
-          { status: 400 }
-        );
+        return NextResponse.json({ success: false, error: 'Invalid scrape type' }, { status: 400 });
     }
 
-    // Initialize job
+    const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const job: ScrapeJob = {
       id: jobId,
       status: 'running',
@@ -141,82 +151,46 @@ export async function POST(request: NextRequest) {
     };
     jobs.set(jobId, job);
 
-    // Spawn Python process with detached mode to survive Next.js hot reloads
     const scriptPath = path.join(SCRIPTS_DIR, scriptName);
 
-    // Verify the script exists before spawning
     if (!fs.existsSync(scriptPath)) {
-      // Also try alternative Python interpreter
-      const altPythonPaths = [
-        '/usr/bin/python3',
-        '/usr/local/bin/python3',
-        path.join(PROJECT_ROOT, 'scrapling_env/bin/python3'),
-      ];
-      const pythonExists = fs.existsSync(PYTHON_PATH) || altPythonPaths.some(p => fs.existsSync(p));
-      
-      const errorMsg = pythonExists
-        ? `Scraper script not found: ${scriptPath}. Make sure the scraping-scripts directory is deployed alongside the application.`
-        : `Scraper script not found: ${scriptPath}. Python interpreter also missing at: ${PYTHON_PATH}. Ensure Python and the scraping environment are installed.`;
-      
-      jobs.delete(jobId); // Clean up the failed job
+      jobs.delete(jobId);
       return NextResponse.json({
         success: false,
-        error: errorMsg,
+        error: `Scraper script not found: ${scriptPath}. Ensure the scraper service is running or scripts are deployed.`,
       }, { status: 500 });
     }
-    
-    // Verify Python interpreter exists
+
     let resolvedPythonPath = PYTHON_PATH;
     if (!fs.existsSync(resolvedPythonPath)) {
-      // Try alternative Python paths
-      const altPythonPaths = [
+      const altPaths = [
         path.join(PROJECT_ROOT, 'scrapling_env/bin/python3'),
-        '/home/z/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/bin/python3.12',
-        '/home/z/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12',
         '/usr/bin/python3',
         '/usr/local/bin/python3',
       ];
-      for (const altPath of altPythonPaths) {
-        if (fs.existsSync(altPath)) {
-          resolvedPythonPath = altPath;
-          break;
-        }
-      }
-      
-      if (!fs.existsSync(resolvedPythonPath)) {
-        jobs.delete(jobId);
-        return NextResponse.json({
-          success: false,
-          error: `Python interpreter not found. Tried: ${PYTHON_PATH} and alternatives. Ensure Python 3.12+ is installed.`,
-        }, { status: 500 });
+      for (const alt of altPaths) {
+        if (fs.existsSync(alt)) { resolvedPythonPath = alt; break; }
       }
     }
 
     const proc = spawn(resolvedPythonPath, [scriptPath, ...args], {
-      timeout: 300000, // 5 minute timeout
-      detached: false, // Keep attached so we can capture output
+      timeout: 300000,
+      detached: false,
       env: {
         ...process.env,
         PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH || '/home/z/.cache/ms-playwright',
         PYTHONPATH: process.env.PYTHONPATH || path.join(PROJECT_ROOT, 'scrapling_env/lib/python3.12/site-packages'),
-        PYTHONUNBUFFERED: '1', // Force unbuffered output for real-time progress
-        PROJECT_ROOT, // Pass project root to Python script
+        PYTHONUNBUFFERED: '1',
+        PROJECT_ROOT,
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    job.pid = proc.pid;
-
     let stdout = '';
     let stderr = '';
 
-    proc.stdout.on('data', (data: Buffer) => {
-      const chunk = data.toString();
-      stdout += chunk;
-
-      // Parse progress messages from stdout
-      const lines = chunk.split('\n');
-      for (const line of lines) {
+    const parseProgress = (chunk: string) => {
+      for (const line of chunk.split('\n')) {
         try {
           const trimmed = line.trim();
           if (!trimmed || trimmed === '===RESULT===' || !trimmed.startsWith('{')) continue;
@@ -226,278 +200,131 @@ export async function POST(request: NextRequest) {
             job.message = parsed.message || '';
             job.detailCount = parsed.detail_count || parsed.detailCount || 0;
           }
-        } catch {
-          // Not a JSON progress line, ignore
-        }
+        } catch { /* not JSON progress */ }
       }
-    });
+    };
 
-    proc.stderr.on('data', (data: Buffer) => {
-      const chunk = data.toString();
-      stderr += chunk;
-
-      // Also parse progress messages from stderr
-      const lines = chunk.split('\n');
-      for (const line of lines) {
-        try {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed === '===RESULT===' || !trimmed.startsWith('{')) continue;
-          const parsed = JSON.parse(trimmed);
-          if (parsed.progress !== undefined && parsed.message !== undefined) {
-            job.progress = parsed.progress;
-            job.message = parsed.message || '';
-            job.detailCount = parsed.detail_count || parsed.detailCount || 0;
-          }
-        } catch {
-          // Not a JSON progress line, ignore
-        }
-      }
-    });
+    proc.stdout.on('data', (data: Buffer) => { stdout += data.toString(); parseProgress(data.toString()); });
+    proc.stderr.on('data', (data: Buffer) => { stderr += data.toString(); parseProgress(data.toString()); });
 
     proc.on('close', (code: number | null, signal: string | null) => {
-      // Save full logs for debugging
-      try {
-        const logFile = path.join(LOG_DIR, `${jobId}.log`);
-        fs.writeFileSync(logFile, JSON.stringify({
-          jobId,
-          code,
-          signal,
-          stdout: stdout.slice(-5000),
-          stderr: stderr.slice(-5000),
-          timestamp: new Date().toISOString(),
-        }, null, 2));
-      } catch {}
-
-      // Check if process was killed by signal
       if (signal) {
         job.status = 'failed';
-        const signalNames: Record<string, string> = {
-          'SIGINT': 'Process was interrupted (SIGINT). This usually happens when the server restarts during scraping.',
-          'SIGTERM': 'Process was terminated (SIGTERM). The server may have killed the scraper process.',
-          'SIGKILL': 'Process was killed (SIGKILL). This may be due to memory limits or server resource constraints.',
-          'SIGHUP': 'Process hung up (SIGHUP). The parent process may have exited.',
-        };
-        job.error = signalNames[signal] || `Process was killed by signal: ${signal}`;
-
-        // Append stderr for more context
-        const stdErrLines = stderr.trim().split('\n')
-          .filter(l => l.trim() && !l.trim().startsWith('{'))
-          .filter(l => !l.includes('[INFO]') && !l.includes('Fetched'))
-          .slice(-3);
-        if (stdErrLines.length > 0) {
-          job.error += `\n\nDetails:\n${stdErrLines.join('\n')}`;
-        }
+        job.error = `Process killed by ${signal}`;
         return;
       }
-
       if (code === 0) {
         try {
-          // Strategy 1: Look for ===RESULT=== marker and parse JSON after it
-          const resultMarker = '===RESULT===';
-          const markerIdx = stdout.indexOf(resultMarker);
-
-          if (markerIdx >= 0) {
-            const afterMarker = stdout.substring(markerIdx + resultMarker.length).trim();
-            const jsonStart = afterMarker.indexOf('{');
-            if (jsonStart >= 0) {
-              const jsonStr = afterMarker.substring(jsonStart);
-              try {
-                const parsed = JSON.parse(jsonStr);
-                if (parsed.success !== undefined) {
-                  job.result = parsed;
-                  job.status = 'completed';
-                  job.progress = 100;
-                  return;
-                }
-              } catch {
-                // Try to find the end of valid JSON
+          const marker = '===RESULT===';
+          const idx = stdout.indexOf(marker);
+          let resultJson = '';
+          if (idx >= 0) {
+            const after = stdout.substring(idx + marker.length).trim();
+            const jsonStart = after.indexOf('{');
+            if (jsonStart >= 0) resultJson = after.substring(jsonStart);
+          }
+          if (!resultJson) {
+            for (let i = stdout.trim().split('\n').length - 1; i >= 0; i--) {
+              const line = stdout.trim().split('\n')[i].trim();
+              if (line.startsWith('{')) {
+                try { const p = JSON.parse(line); if (p.success !== undefined) { resultJson = line; break; } } catch {}
               }
             }
           }
-
-          // Strategy 2: Find the last valid JSON with 'success' key in stdout
-          const stdoutLines = stdout.trim().split('\n');
-          let lastJson = '';
-
-          for (let i = stdoutLines.length - 1; i >= 0; i--) {
-            const line = stdoutLines[i].trim();
-            if (line.startsWith('{')) {
-              try {
-                const parsed = JSON.parse(line);
-                if (parsed.success !== undefined) {
-                  lastJson = line;
-                  break;
-                }
-              } catch {
-                // Not a valid JSON result
-              }
-            }
-          }
-
-          if (lastJson) {
-            job.result = JSON.parse(lastJson);
+          if (resultJson) {
+            job.result = JSON.parse(resultJson);
             job.status = 'completed';
             job.progress = 100;
           } else {
-            // Strategy 3: Try to find JSON in combined output
-            const combined = stdout + '\n' + stderr;
-            const combinedLines = combined.trim().split('\n');
-
-            for (let i = combinedLines.length - 1; i >= 0; i--) {
-              const line = combinedLines[i].trim();
-              if (line.startsWith('{')) {
-                try {
-                  const parsed = JSON.parse(line);
-                  if (parsed.success !== undefined && parsed.results !== undefined) {
-                    job.result = parsed;
-                    job.status = 'completed';
-                    job.progress = 100;
-                    return;
-                  }
-                } catch {}
-              }
-            }
-
-            job.status = 'failed';
-            job.error = `Failed to parse scraper output. The scraper may have crashed. Output: ${stdout.slice(-300)}`;
-          }
-        } catch {
-          try {
-            const stderrLines = stderr.trim().split('\n');
-            let lastJson = '';
-            for (let i = stderrLines.length - 1; i >= 0; i--) {
-              const line = stderrLines[i].trim();
-              if (line.startsWith('{')) {
-                try {
-                  const parsed = JSON.parse(line);
-                  if (parsed.success !== undefined) {
-                    lastJson = line;
-                    break;
-                  }
-                } catch {}
-              }
-            }
-            if (lastJson) {
-              job.result = JSON.parse(lastJson);
-              job.status = 'completed';
-              job.progress = 100;
-            } else {
-              job.status = 'failed';
-              job.error = `Failed to parse scraper output. Stderr: ${stderr.slice(-300)}`;
-            }
-          } catch {
             job.status = 'failed';
             job.error = `Failed to parse scraper output. Raw: ${stdout.slice(-300)}`;
           }
+        } catch {
+          job.status = 'failed';
+          job.error = `Failed to parse scraper output. Stderr: ${stderr.slice(-300)}`;
         }
       } else {
         job.status = 'failed';
-
-        // Build a meaningful error message
-        const errorParts: string[] = [];
-
-        // Exit code explanation
-        const exitCodeMessages: Record<number, string> = {
-          1: 'General error — the scraper encountered an exception.',
-          2: 'Misuse of shell builtins — check the scraper arguments.',
-          126: 'Permission denied — the Python script may not be executable.',
-          127: 'Command not found — the Python interpreter may not be at the expected path.',
-          128: 'Invalid argument to exit.',
-          130: 'Script was interrupted (Ctrl+C / SIGINT).',
-          137: 'Script was killed (SIGKILL) — possibly by the OS due to memory limits.',
-          143: 'Script was terminated (SIGTERM).',
-        };
-
-        if (code && exitCodeMessages[code]) {
-          errorParts.push(exitCodeMessages[code]);
-        } else {
-          errorParts.push(`Script exited with code ${code}`);
-        }
-
-        // Extract meaningful lines from stderr
-        const stdErrLines = stderr.trim().split('\n')
-          .filter(l => l.trim())
-          .filter(l => !l.trim().startsWith('{'))
-          .filter(l => !l.includes('[INFO]') && !l.includes('Fetched (200)') && !l.includes('Fetched (404)'))
-          .slice(-5);
-
-        if (stdErrLines.length > 0) {
-          errorParts.push('Error details:');
-          errorParts.push(...stdErrLines);
-        }
-
-        // Also check stdout for error info
-        if (stdout.includes('Error') || stdout.includes('error') || stdout.includes('Traceback')) {
-          const stdoutErrorLines = stdout.split('\n')
-            .filter(l => l.includes('Error') || l.includes('Traceback') || l.includes('error'))
-            .slice(-3);
-          if (stdoutErrorLines.length > 0 && stdErrLines.length === 0) {
-            errorParts.push('Output errors:');
-            errorParts.push(...stdoutErrorLines);
-          }
-        }
-
-        job.error = errorParts.join('\n');
+        job.error = stderr.trim().split('\n').filter(l => l.trim() && !l.includes('[INFO]')).slice(-3).join('\n') || `Script exited with code ${code}`;
       }
     });
 
     proc.on('error', (err: Error) => {
       job.status = 'failed';
-      // Provide more context for common spawn errors
-      if (err.message.includes('ENOENT')) {
-        job.error = `Python interpreter not found at: ${PYTHON_PATH}. Please verify the installation path.`;
-      } else if (err.message.includes('EACCES')) {
-        job.error = `Permission denied when trying to execute: ${PYTHON_PATH}`;
-      } else {
-        job.error = `Failed to start scraper: ${err.message}`;
-      }
+      job.error = `Failed to start scraper: ${err.message}`;
     });
 
-    // Return the job ID immediately
-    return NextResponse.json({
-      success: true,
-      jobId,
-      message: 'Scraping job started',
-    });
+    return NextResponse.json({ success: true, jobId, message: 'Scraping job started (local mode)' });
+
   } catch (error) {
     console.error('Scraping error:', error);
     return NextResponse.json(
-      {
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error occurred',
-      },
+      { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
       { status: 500 }
     );
   }
 }
 
-// GET endpoint to poll job status
+// GET endpoint — poll job status
 export async function GET(request: NextRequest) {
   const jobId = request.nextUrl.searchParams.get('jobId');
-
   if (!jobId) {
-    return NextResponse.json(
-      { success: false, error: 'jobId parameter is required' },
-      { status: 400 }
-    );
+    return NextResponse.json({ success: false, error: 'jobId parameter is required' }, { status: 400 });
   }
 
-  const job = jobs.get(jobId);
-  if (!job) {
-    return NextResponse.json(
-      { success: false, error: 'Job not found' },
-      { status: 404 }
-    );
+  // Try local job store first
+  const localJob = jobs.get(jobId);
+  if (localJob) {
+    // If job is running and we have a remote scraper, also check remote
+    if (localJob.status === 'running' && SCRAPER_SERVICE_URL) {
+      try {
+        const remoteRes = await fetch(`${SCRAPER_SERVICE_URL}/scrape/${jobId}`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        if (remoteRes.ok) {
+          const remoteData = await remoteRes.json();
+          if (remoteData.status === 'completed' || remoteData.status === 'failed') {
+            // Update local store with remote result
+            localJob.status = remoteData.status;
+            localJob.progress = remoteData.progress;
+            localJob.message = remoteData.message;
+            localJob.detailCount = remoteData.detailCount;
+            localJob.result = remoteData.result;
+            localJob.error = remoteData.error;
+          } else if (remoteData.status === 'running') {
+            // Update progress from remote
+            localJob.progress = remoteData.progress || localJob.progress;
+            localJob.message = remoteData.message || localJob.message;
+            localJob.detailCount = remoteData.detailCount || localJob.detailCount;
+          }
+        }
+      } catch { /* remote unavailable, return local state */ }
+    }
+
+    return NextResponse.json({
+      success: true,
+      jobId: localJob.id,
+      status: localJob.status,
+      progress: localJob.progress,
+      message: localJob.message,
+      detailCount: localJob.detailCount,
+      result: localJob.result,
+      error: localJob.error,
+    });
   }
 
-  return NextResponse.json({
-    success: true,
-    jobId: job.id,
-    status: job.status,
-    progress: job.progress,
-    message: job.message,
-    detailCount: job.detailCount,
-    result: job.result,
-    error: job.error,
-  });
+  // Try remote scraper service directly
+  if (SCRAPER_SERVICE_URL) {
+    try {
+      const remoteRes = await fetch(`${SCRAPER_SERVICE_URL}/scrape/${jobId}`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (remoteRes.ok) {
+        const remoteData = await remoteRes.json();
+        return NextResponse.json(remoteData);
+      }
+    } catch { /* remote unavailable */ }
+  }
+
+  return NextResponse.json({ success: false, error: 'Job not found' }, { status: 404 });
 }

@@ -1,5 +1,3 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
-
 # dependencies
 node_modules
 /.pnp
@@ -36,7 +34,6 @@ yarn-error.log*
 # vercel
 .vercel
 
-
 # typescript
 *.tsbuildinfo
 next-env.d.ts
@@ -48,7 +45,31 @@ dev.log
 dev.out.log
 test
 prompt
-
 server.log
-# Skills directory
+
+# Skills directory (Z.AI specific)
 /skills/
+
+# Python virtual environment (too large for git, installed on deploy)
+scrapling_env/
+
+# Database (local only)
+db/
+
+# Download directory (local output)
+download/
+
+# Upload directory
+upload/
+
+# Z.AI scripts (not needed for Vercel)
+.zscripts/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
