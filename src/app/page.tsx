@@ -960,12 +960,12 @@ export default function Home() {
                             id="maxResults"
                             type="number"
                             min={1}
-                            max={100}
+                            max={500}
                             value={config.maxResults}
                             onChange={(e) =>
                               setConfig((prev) => ({
                                 ...prev,
-                                maxResults: parseInt(e.target.value) || 20,
+                                maxResults: Math.min(parseInt(e.target.value) || 20, 500),
                               }))
                             }
                           />
