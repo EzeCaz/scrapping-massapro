@@ -19,7 +19,6 @@ RUN playwright install chromium
 # Copy scraper code
 COPY . .
 
-# Expose port (Railway/Render set PORT env var)
-EXPOSE 8000
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Render provides PORT env var (usually 10000)
+# Use shell form so $PORT is resolved at runtime
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-10000}
