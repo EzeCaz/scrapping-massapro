@@ -1,9 +1,10 @@
 import type { NextConfig } from "next";
 
+const isVercel = !!process.env.VERCEL || !!process.env.NOW_BUILDER;
+
 const nextConfig: NextConfig = {
   // Vercel handles the build output itself, so we don't need "standalone"
-  // For Z.AI container deploys, the build script adds standalone manually
-  output: process.env.VERCEL ? undefined : "standalone",
+  output: isVercel ? undefined : "standalone",
 
   typescript: {
     ignoreBuildErrors: true,
