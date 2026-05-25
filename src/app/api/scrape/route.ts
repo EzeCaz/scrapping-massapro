@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// Scraper service URL — deployed on Railway/Render separately from Vercel
-const SCRAPER_SERVICE_URL = process.env.SCRAPER_SERVICE_URL || 'http://localhost:8000';
+// Scraper service URL — deployed on Render separately from Vercel
+const SCRAPER_SERVICE_URL = process.env.SCRAPER_SERVICE_URL || '';
+const IS_VERCEL = !!(process.env.VERCEL || process.env.NOW_BUILDER);
 
 // In-memory job store for async scraping (fallback when scraper service is local)
 interface ScrapeJob {
@@ -63,52 +64,68 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // --- Mode 1: Call remote scraper service (Vercel → Railway) ---
-    try {
-      const scraperRes = await fetch(`${SCRAPER_SERVICE_URL}/scrape`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type,
-          query,
-          url,
-          maxResults: maxResults || 20,
-          maxPages: maxPages || 5,
-          depth: depth || 0,
-          fetcher: fetcher || 'dynamic',
-          fetchDetails: fetchDetails !== false,
-        }),
-        signal: AbortSignal.timeout(10000), // 10s connection timeout
-      });
+    // --- Mode 1: Call remote scraper service (Vercel → Render) ---
+    if (SCRAPER_SERVICE_URL) {
+      console.log(`[scrape] Calling remote scraper service: ${SCRAPER_SERVICE_URL}/scrape`);
+      try {
+        const scraperRes = await fetch(`${SCRAPER_SERVICE_URL}/scrape`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type,
+            query,
+            url,
+            maxResults: maxResults || 20,
+            maxPages: maxPages || 5,
+            depth: depth || 0,
+            fetcher: fetcher || 'dynamic',
+            fetchDetails: fetchDetails !== false,
+          }),
+          signal: AbortSignal.timeout(60000), // 60s timeout (Render free tier needs ~30s cold start)
+        });
 
-      if (scraperRes.ok) {
-        const data = await scraperRes.json();
-        if (data.jobId) {
-          // Also store locally for quick lookup
-          const jobId = data.jobId;
-          jobs.set(jobId, {
-            id: jobId,
-            status: 'running',
-            progress: 0,
-            message: 'Job forwarded to scraper service',
-            detailCount: 0,
-            result: null,
-            error: '',
-            startedAt: Date.now(),
-          });
-          return NextResponse.json({
-            success: true,
-            jobId,
-            message: 'Scraping job started',
-          });
+        if (scraperRes.ok) {
+          const data = await scraperRes.json();
+          if (data.jobId) {
+            const jobId = data.jobId;
+            jobs.set(jobId, {
+              id: jobId,
+              status: 'running',
+              progress: 0,
+              message: 'Job forwarded to scraper service',
+              detailCount: 0,
+              result: null,
+              error: '',
+              startedAt: Date.now(),
+            });
+            return NextResponse.json({
+              success: true,
+              jobId,
+              message: 'Scraping job started',
+            });
+          }
+        } else {
+          const errorText = await scraperRes.text();
+          console.error(`[scrape] Remote service returned ${scraperRes.status}: ${errorText}`);
         }
+      } catch (fetchErr) {
+        console.error('[scrape] Remote service unavailable:', fetchErr instanceof Error ? fetchErr.message : String(fetchErr));
       }
-    } catch (fetchErr) {
-      // Remote service unavailable — fall through to local mode
-      console.warn('Scraper service unavailable, falling back to local subprocess:', fetchErr instanceof Error ? fetchErr.message : String(fetchErr));
+    } else {
+      console.log('[scrape] SCRAPER_SERVICE_URL not set');
     }
 
-    // --- Mode 2: Local subprocess fallback (Z.AI container / dev mode) ---
+    // --- Mode 2: Local subprocess fallback (Z.AI container / dev mode only) ---
+    // On Vercel, there are no local scripts, so this will always fail.
+    // Skip local fallback on Vercel and return a clear error instead.
+    if (IS_VERCEL) {
+      return NextResponse.json({
+        success: false,
+        error: 'Scraper service is unavailable. This could mean:\n1. The scraper service on Render is still waking up (free tier sleeps after 15min). Please try again in 30 seconds.\n2. The SCRAPER_SERVICE_URL environment variable may not be set in Vercel.',
+      }, { status: 503 });
+    }
+
+    // Local subprocess mode (for Z.AI / dev only)
     const { spawn } = await import('child_process');
     const path = await import('path');
     const fs = await import('fs');
@@ -279,7 +296,7 @@ export async function GET(request: NextRequest) {
     if (localJob.status === 'running' && SCRAPER_SERVICE_URL) {
       try {
         const remoteRes = await fetch(`${SCRAPER_SERVICE_URL}/scrape/${jobId}`, {
-          signal: AbortSignal.timeout(5000),
+          signal: AbortSignal.timeout(30000), // 30s for Render cold start
         });
         if (remoteRes.ok) {
           const remoteData = await remoteRes.json();
@@ -317,7 +334,7 @@ export async function GET(request: NextRequest) {
   if (SCRAPER_SERVICE_URL) {
     try {
       const remoteRes = await fetch(`${SCRAPER_SERVICE_URL}/scrape/${jobId}`, {
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(30000), // 30s for Render cold start
       });
       if (remoteRes.ok) {
         const remoteData = await remoteRes.json();
