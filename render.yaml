@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: massascraper
+    runtime: docker
+    dockerfilePath: ./scraper-service/Dockerfile
+    dockerContext: ./scraper-service
+    plan: free
+    envVars:
+      - key: PORT
+        sync: false

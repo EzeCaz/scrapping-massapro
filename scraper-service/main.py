@@ -223,6 +223,21 @@ async def health():
     return {"status": "ok", "service": "scrapling-scraper"}
 
 
+@app.get("/")
+async def root():
+    """Root endpoint — confirms the service is running."""
+    return {
+        "service": "scrapling-scraper",
+        "version": "1.0.0",
+        "status": "running",
+        "endpoints": {
+            "POST /scrape": "Start a scraping job",
+            "GET /scrape/{job_id}": "Poll job status",
+            "GET /health": "Health check",
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Cleanup old jobs periodically
 # ---------------------------------------------------------------------------

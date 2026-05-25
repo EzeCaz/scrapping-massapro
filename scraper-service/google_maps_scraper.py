@@ -24,9 +24,11 @@ import os
 import signal
 import traceback
 
-# Add scrapling env to path (use PROJECT_ROOT env var for production compatibility)
+# Add scrapling env to path for local development (Docker uses global pip install)
 _project_root = os.environ.get('PROJECT_ROOT', '/home/z/my-project')
-sys.path.insert(0, os.path.join(_project_root, 'scrapling_env/lib/python3.12/site-packages'))
+_local_site_packages = os.path.join(_project_root, 'scrapling_env/lib/python3.12/site-packages')
+if os.path.isdir(_local_site_packages):
+    sys.path.insert(0, _local_site_packages)
 
 from playwright.sync_api import sync_playwright
 from scrapling.fetchers import Fetcher
