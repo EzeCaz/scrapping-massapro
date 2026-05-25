@@ -9,8 +9,6 @@ generator client {
 datasource db {
   provider = "sqlite"
   url      = env("DATABASE_URL")
-  // Fallback for build time when DATABASE_URL is not set (prisma generate doesn't connect)
-  directUrl = env("DATABASE_URL")
 }
 
 model User {

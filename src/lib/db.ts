@@ -6,7 +6,9 @@ const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
 }
 
-function createPrismaClient() {
+let _db: PrismaClient | undefined = undefined
+
+function createPrismaClient(): PrismaClient {
   const databaseUrl = process.env.DATABASE_URL
   const authToken = process.env.DATABASE_AUTH_TOKEN
 
@@ -34,6 +36,22 @@ function createPrismaClient() {
   return new PrismaClient({ log: ['query'] })
 }
 
-export const db = globalForPrisma.prisma ?? createPrismaClient()
+// Lazy getter — only creates the client when first accessed, not at import time
+export function getDb(): PrismaClient {
+  if (_db) return _db
+  _db = globalForPrisma.prisma ?? createPrismaClient()
+  if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = _db
+  return _db
+}
 
-if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db
+// For backward compatibility — but uses lazy init
+export const db = new Proxy({} as PrismaClient, {
+  get(_target, prop, receiver) {
+    const realDb = getDb()
+    const value = Reflect.get(realDb, prop, receiver)
+    if (typeof value === 'function') {
+      return value.bind(realDb)
+    }
+    return value
+  },
+})
