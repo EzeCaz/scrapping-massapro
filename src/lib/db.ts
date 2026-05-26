@@ -1,5 +1,5 @@
 import { PrismaClient } from '@prisma/client'
-import { PrismaLibSql } from '@prisma/adapter-libsql'
+import { PrismaLibSQL } from '@prisma/adapter-libsql'
 import { createClient } from '@libsql/client'
 
 // ─── Lazy singleton ───────────────────────────────────────────────────
@@ -52,7 +52,7 @@ function createPrismaClient(): PrismaClient {
         url: databaseUrl,
         authToken: cleanAuthToken,
       })
-      const adapter = new PrismaLibSql(libsql)
+      const adapter = new PrismaLibSQL(libsql)
       return new PrismaClient({ adapter } as any)
     } catch (err) {
       console.error('[db] Turso connection failed:', err)
@@ -78,7 +78,7 @@ function createPrismaClient(): PrismaClient {
         url: databaseUrl,
         authToken: cleanAuthToken,
       })
-      const adapter = new PrismaLibSql(libsql)
+      const adapter = new PrismaLibSQL(libsql)
       return new PrismaClient({ adapter } as any)
     } catch (err) {
       console.error('[db] Turso connection failed, falling back to SQLite:', err)
