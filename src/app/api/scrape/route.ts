@@ -151,7 +151,7 @@ export async function POST(request: NextRequest) {
     const path = await import('path');
     const fs = await import('fs');
 
-    const PROJECT_ROOT = process.env.PROJECT_ROOT || '/home/z/my-project';
+    const PROJECT_ROOT = process.env.PROJECT_ROOT || process.cwd();
     const PYTHON_PATH = process.env.PYTHON_PATH || path.join(PROJECT_ROOT, 'scrapling_env/bin/python3.12');
     const SCRIPTS_DIR = process.env.SCRIPTS_DIR || path.join(PROJECT_ROOT, 'scraping-scripts');
 
@@ -216,8 +216,8 @@ export async function POST(request: NextRequest) {
       detached: false,
       env: {
         ...process.env,
-        PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH || '/home/z/.cache/ms-playwright',
-        PYTHONPATH: process.env.PYTHONPATH || path.join(PROJECT_ROOT, 'scrapling_env/lib/python3.12/site-packages'),
+        PLAYWRIGHT_BROWSERS_PATH: process.env.PLAYWRIGHT_BROWSERS_PATH || '',
+        PYTHONPATH: process.env.PYTHONPATH || '',
         PYTHONUNBUFFERED: '1',
         PROJECT_ROOT,
       },

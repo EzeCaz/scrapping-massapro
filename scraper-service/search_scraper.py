@@ -12,7 +12,7 @@ import sys
 import time
 
 import os
-_project_root = os.environ.get('PROJECT_ROOT', '/home/z/my-project')
+_project_root = os.environ.get('PROJECT_ROOT', os.path.dirname(os.path.abspath(__file__)))
 _local_site_packages = os.path.join(_project_root, 'scrapling_env/lib/python3.12/site-packages')
 if os.path.isdir(_local_site_packages):
     sys.path.insert(0, _local_site_packages)
