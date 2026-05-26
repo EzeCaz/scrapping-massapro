@@ -51,9 +51,12 @@ def handle_signal(signum, frame):
     print_result(result)
     sys.exit(130)  # 128 + SIGINT(2) = standard exit code for SIGINT
 
-# Register signal handlers for graceful shutdown
-signal.signal(signal.SIGINT, handle_signal)
-signal.signal(signal.SIGTERM, handle_signal)
+# Register signal handlers for graceful shutdown — only in the main thread
+# (When running via FastAPI ThreadPoolExecutor, we're in a worker thread, so skip)
+import threading
+if threading.current_thread() is threading.main_thread():
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
 
 
 # Booking platform domains to skip when looking for real business websites
