@@ -272,6 +272,17 @@ export default function Home() {
     }
   }, [activeTab, leadSortBy, leadSortOrder, leadStatusFilter, leadSearchFilter, leadCategoryFilter, fetchLeads]);
 
+  // Warm up the Render scraper service on page load so it's ready when user searches
+  const [scraperAwake, setScraperAwake] = useState(false);
+  useEffect(() => {
+    fetch('/api/wakeup').catch(() => {}).then((res) => {
+      if (res?.ok) {
+        setScraperAwake(true);
+        console.log('[warmup] Scraper service is awake');
+      }
+    });
+  }, []);
+
   const handleScrape = useCallback(async () => {
     if (config.type !== 'generic' && !config.query.trim()) {
       toast({
@@ -724,6 +735,11 @@ export default function Home() {
               </div>
             </div>
             <div className="flex items-center gap-2">
+              {/* Scraper service status indicator */}
+              <Badge variant={scraperAwake ? "default" : "secondary"} className="text-xs gap-1">
+                <span className={`h-2 w-2 rounded-full ${scraperAwake ? 'bg-green-400' : 'bg-yellow-400 animate-pulse'}`} />
+                {scraperAwake ? 'Service Ready' : 'Waking up...'}
+              </Badge>
               {result && (
                 <>
                   <Button variant="outline" size="sm" onClick={exportCSV}>

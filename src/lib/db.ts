@@ -6,52 +6,39 @@ const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
 }
 
-let _db: PrismaClient | undefined = undefined
-
 function createPrismaClient(): PrismaClient {
   const databaseUrl = process.env.DATABASE_URL
   const authToken = process.env.DATABASE_AUTH_TOKEN
 
-  console.log('[db] DATABASE_URL:', databaseUrl ? `${databaseUrl.substring(0, 30)}...` : 'NOT SET')
-  console.log('[db] DATABASE_AUTH_TOKEN:', authToken ? 'SET (hidden)' : 'NOT SET')
-
-  // If using Turso/libSQL, use the driver adapter
+  // Use Turso/libSQL if URL is provided and valid
   if (databaseUrl &&
       typeof databaseUrl === 'string' &&
       databaseUrl !== 'undefined' &&
       databaseUrl.length > 0 &&
       (databaseUrl.startsWith('libsql://') || databaseUrl.startsWith('http://') || databaseUrl.startsWith('https://'))) {
-    console.log('[db] Using Turso/libSQL adapter')
 
-    const libsql = createClient({
-      url: databaseUrl,
-      authToken: (authToken && authToken !== 'undefined' && authToken.length > 0) ? authToken : undefined,
-    })
-    const adapter = new PrismaLibSql(libsql)
-    return new PrismaClient({ adapter, log: ['query'] } as any)
+    const cleanAuthToken = (authToken && typeof authToken === 'string' && authToken !== 'undefined' && authToken.length > 0)
+      ? authToken
+      : undefined
+
+    try {
+      const libsql = createClient({
+        url: databaseUrl,
+        authToken: cleanAuthToken,
+      })
+      const adapter = new PrismaLibSql(libsql)
+      return new PrismaClient({ adapter } as any)
+    } catch (err) {
+      console.error('[db] Turso connection failed:', err)
+      throw err
+    }
   }
 
-  // Default: local SQLite file (for dev / Z.AI container)
-  console.log('[db] Using local SQLite (no Turso URL detected)')
-  return new PrismaClient({ log: ['query'] })
+  // Fallback: local SQLite (dev only)
+  return new PrismaClient()
 }
 
-// Lazy getter — only creates the client when first accessed, not at import time
-export function getDb(): PrismaClient {
-  if (_db) return _db
-  _db = globalForPrisma.prisma ?? createPrismaClient()
-  if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = _db
-  return _db
-}
+// Singleton — only create once per process
+export const db = globalForPrisma.prisma ?? createPrismaClient()
 
-// For backward compatibility — but uses lazy init
-export const db = new Proxy({} as PrismaClient, {
-  get(_target, prop, receiver) {
-    const realDb = getDb()
-    const value = Reflect.get(realDb, prop, receiver)
-    if (typeof value === 'function') {
-      return value.bind(realDb)
-    }
-    return value
-  },
-})
+if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db

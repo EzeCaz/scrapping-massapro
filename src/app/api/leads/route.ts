@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
+import { db } from '@/lib/db';
 
 // GET /api/leads - Fetch all leads with optional filtering/sorting
 export async function GET(request: NextRequest) {
@@ -49,7 +49,7 @@ export async function GET(request: NextRequest) {
     else if (sortBy === 'createdAt') orderBy = { createdAt: orderDir };
     else if (sortBy === 'updatedAt') orderBy = { updatedAt: orderDir };
 
-    const leads = await getDb().lead.findMany({
+    const leads = await db.lead.findMany({
       where,
       orderBy,
     });
@@ -96,7 +96,7 @@ export async function POST(request: NextRequest) {
       if (lead.email) {
         orConditions.push({ email: lead.email });
       }
-      const existing = await getDb().lead.findFirst({
+      const existing = await db.lead.findFirst({
         where: {
           OR: orConditions,
         },
@@ -107,7 +107,7 @@ export async function POST(request: NextRequest) {
         continue;
       }
 
-      const newLead = await getDb().lead.create({
+      const newLead = await db.lead.create({
         data: {
           name: lead.name || '',
           address: lead.address || '',
@@ -156,7 +156,7 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    const result = await getDb().lead.deleteMany({
+    const result = await db.lead.deleteMany({
       where: {
         id: { in: ids },
       },
@@ -188,7 +188,7 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
-    const lead = await getDb().lead.update({
+    const lead = await db.lead.update({
       where: { id },
       data,
     });
