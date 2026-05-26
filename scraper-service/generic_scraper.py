@@ -91,7 +91,7 @@ def extract_addresses(text):
     return list(set(addresses))
 
 
-def scrape_generic(url, depth=1, fetcher_type='stealthy'):
+def scrape_generic(url, depth=1, fetcher_type='stealthy', progress_callback=None):
     """
     Scrape a generic website for contact information.
     
@@ -109,6 +109,13 @@ def scrape_generic(url, depth=1, fetcher_type='stealthy'):
     all_addresses = []
     all_social_links = {}
     page_results = []
+
+    def _report_progress(progress, message, detail_count=0):
+        if progress_callback:
+            try:
+                progress_callback(progress, message, detail_count)
+            except Exception:
+                pass
     
     def scrape_page(target_url):
         if target_url in visited:

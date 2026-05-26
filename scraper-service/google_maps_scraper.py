@@ -350,291 +350,352 @@ def extract_details_from_page(page):
     return details
 
 
-def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_details=True):
+def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_details=True, progress_callback=None):
     """
     Scrape Google Maps search results using Playwright.
     Navigates directly to each business detail URL for accurate data.
+    
+    Args:
+        query: Search query string
+        max_results: Maximum number of results to return
+        fetcher_type: Type of fetcher (always uses Playwright for Google Maps)
+        fetch_details: Whether to fetch detailed info for each result
+        progress_callback: Optional callback(progress:int, message:str, detail_count:int) 
+                          called during scraping to update job status
     """
     encoded_query = query.replace(' ', '+')
     url = f'https://www.google.com/maps/search/{encoded_query}?hl=en&gl=us'
 
-    print_progress(0, max_results, f"Fetching search results for: {query}")
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            viewport={'width': 1440, 'height': 900},
-            locale='en-US',
-        )
-        page = context.new_page()
-
-        try:
-            # Step 1: Navigate to search results
-            page.goto(url, timeout=45000, wait_until='domcontentloaded')
-
-            # Wait for business cards to appear
+    def _progress(current, total, message, detail_count=0):
+        """Report progress via both stdout and callback."""
+        print_progress(current, total, message, detail_count)
+        if progress_callback:
             try:
-                page.wait_for_selector('div.Nv2PK', timeout=20000)
-            except:
-                pass
+                pct = int((current / max(total, 1)) * 100)
+                progress_callback(pct, message, detail_count)
+            except Exception:
+                pass  # Never let callback errors break the scraper
 
-            time.sleep(2)
+    _progress(0, max_results, f"Fetching search results for: {query}")
 
-            # Scroll to load more results if needed
-            cards = page.query_selector_all('div.Nv2PK')
-            scroll_attempts = 0
-            max_scroll_attempts = max(10, max_results // 3)  # Scale scrolling with requested results
-            while len(cards) < max_results and scroll_attempts < max_scroll_attempts:
-                try:
-                    feed = page.query_selector('div[role="feed"]')
-                    if feed:
-                        feed.evaluate('el => el.scrollTop = el.scrollHeight')
-                    else:
-                        page.keyboard.press('End')
-                except:
+    # Launch Playwright with better error handling for Render/Docker
+    try:
+        p = sync_playwright().start()
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--single-process',
+                '--no-zygote',
+            ],
+        )
+    except Exception as e:
+        error_msg = str(e)
+        if 'Executable doesn\'t exist' in error_msg or 'chromium' in error_msg.lower():
+            return {
+                'success': False,
+                'query': query,
+                'error': f'Playwright Chromium is not installed on the server. Please run: playwright install chromium --with-deps. Original error: {error_msg}',
+                'results': [],
+            }
+        return {
+            'success': False,
+            'query': query,
+            'error': f'Failed to launch Playwright browser: {error_msg}',
+            'results': [],
+        }
+
+    context = browser.new_context(
+        viewport={'width': 1440, 'height': 900},
+        locale='en-US',
+    )
+    page = context.new_page()
+
+    try:
+        # Step 1: Navigate to search results
+        _progress(5, max_results, "Loading Google Maps search page...")
+        page.goto(url, timeout=45000, wait_until='domcontentloaded')
+
+        # Wait for business cards to appear
+        try:
+            page.wait_for_selector('div.Nv2PK', timeout=20000)
+        except:
+            pass
+
+        time.sleep(2)
+
+        _progress(10, max_results, "Loading search results...")
+
+        # Scroll to load more results if needed
+        cards = page.query_selector_all('div.Nv2PK')
+        scroll_attempts = 0
+        max_scroll_attempts = max(10, max_results // 3)  # Scale scrolling with requested results
+        while len(cards) < max_results and scroll_attempts < max_scroll_attempts:
+            try:
+                feed = page.query_selector('div[role="feed"]')
+                if feed:
+                    feed.evaluate('el => el.scrollTop = el.scrollHeight')
+                else:
                     page.keyboard.press('End')
-                time.sleep(1.5)
-                cards = page.query_selector_all('div.Nv2PK')
-                scroll_attempts += 1
+            except:
+                page.keyboard.press('End')
+            time.sleep(1.5)
+            cards = page.query_selector_all('div.Nv2PK')
+            scroll_attempts += 1
 
-            if not cards:
-                # Check if we're on a single business page
-                is_detail = (
-                    len(page.query_selector_all('a[href^="tel:"]')) > 0 or
-                    len(page.query_selector_all('div.Io6YTe')) > 0
-                )
-                if is_detail:
-                    details = extract_details_from_page(page)
+        if not cards:
+            # Check if we're on a single business page
+            is_detail = (
+                len(page.query_selector_all('a[href^="tel:"]')) > 0 or
+                len(page.query_selector_all('div.Io6YTe')) > 0
+            )
+            if is_detail:
+                details = extract_details_from_page(page)
 
-                    # Try to get name from h1
-                    name = ''
-                    h1 = page.query_selector('h1')
-                    if h1:
-                        name = h1.inner_text().strip()
-                    if not name:
-                        # Try aria-label approach
-                        for el in page.query_selector_all('[aria-label]'):
-                            aria = el.get_attribute('aria-label') or ''
-                            if aria and 3 < len(aria) < 80:
-                                skip = ['search', 'direction', 'save', 'share', 'close', 'menu', 'map', 'photo']
-                                if not any(s in aria.lower() for s in skip):
-                                    name = aria
-                                    break
+                # Try to get name from h1
+                name = ''
+                h1 = page.query_selector('h1')
+                if h1:
+                    name = h1.inner_text().strip()
+                if not name:
+                    # Try aria-label approach
+                    for el in page.query_selector_all('[aria-label]'):
+                        aria = el.get_attribute('aria-label') or ''
+                        if aria and 3 < len(aria) < 80:
+                            skip = ['search', 'direction', 'save', 'share', 'close', 'menu', 'map', 'photo']
+                            if not any(s in aria.lower() for s in skip):
+                                name = aria
+                                break
 
-                    business = {
-                        'name': name,
-                        'address': details['address'],
-                        'phone': details['phone'],
-                        'website': details['website'],
-                        'rating': details['rating'],
-                        'reviews_count': details['reviews_count'],
-                        'category': details['category'],
-                        'email': details['email'],
-                        'source': 'Google Maps',
-                        'source_url': url,
-                    }
+                business = {
+                    'name': name,
+                    'address': details['address'],
+                    'phone': details['phone'],
+                    'website': details['website'],
+                    'rating': details['rating'],
+                    'reviews_count': details['reviews_count'],
+                    'category': details['category'],
+                    'email': details['email'],
+                    'source': 'Google Maps',
+                    'source_url': url,
+                }
 
-                    if not business['email'] and business['website']:
-                        try:
-                            website_emails = fetch_website_emails(business['website'])
-                            if website_emails:
-                                business['email'] = website_emails[0]
-                        except:
-                            pass
+                if not business['email'] and business['website']:
+                    try:
+                        website_emails = fetch_website_emails(business['website'])
+                        if website_emails:
+                            business['email'] = website_emails[0]
+                    except:
+                        pass
 
-                    score = 0
-                    if business.get('email'): score += 100
-                    if business.get('phone'): score += 50
-                    if business.get('website'): score += 10
-                    if business.get('address'): score += 5
-                    business['priority_score'] = score
-
-                    browser.close()
-                    result = {
-                        'success': True,
-                        'query': query,
-                        'results_count': 1,
-                        'results': [business],
-                    }
-                    print_result(result)
-                    return result
+                score = 0
+                if business.get('email'): score += 100
+                if business.get('phone'): score += 50
+                if business.get('website'): score += 10
+                if business.get('address'): score += 5
+                business['priority_score'] = score
 
                 browser.close()
+                p.stop()
                 result = {
                     'success': True,
                     'query': query,
-                    'results_count': 0,
-                    'results': [],
-                    'message': 'No business listings found on the search page.',
+                    'results_count': 1,
+                    'results': [business],
                 }
                 print_result(result)
                 return result
 
-            # Step 2: Collect all card info (names and detail URLs) BEFORE navigating away
-            card_info = []
-            for card in cards[:max_results]:
-                name_el = card.query_selector('div.qBF1Pd, .fontHeadlineSmall')
-                name = name_el.inner_text().strip() if name_el else ''
-
-                if not name:
-                    aria = card.get_attribute('aria-label') or ''
-                    if aria:
-                        name = clean_text(aria)
-
-                if not name:
-                    continue
-
-                # Get the detail page link (a.hfpxzc is the main card link)
-                link_el = card.query_selector('a.hfpxzc')
-                href = link_el.get_attribute('href') if link_el else ''
-
-                # Also try any link with /maps/place/
-                if not href:
-                    link_el = card.query_selector('a[href*="/maps/place/"]')
-                    href = link_el.get_attribute('href') if link_el else ''
-
-                card_info.append({
-                    'name': name,
-                    'href': href,
-                })
-
-            # Step 3: Navigate to each detail URL and extract data
-            businesses = []
-            total = len(card_info)
-
-            if fetch_details and card_info:
-                max_details = min(total, max_results)
-
-                for i, info in enumerate(card_info[:max_details]):
-                    # Check if shutdown was requested
-                    if _shutdown_requested:
-                        break
-
-                    biz = {
-                        'name': info['name'],
-                        'address': '',
-                        'phone': '',
-                        'website': '',
-                        'rating': '',
-                        'reviews_count': '',
-                        'category': '',
-                        'email': '',
-                        'source': 'Google Maps',
-                        'source_url': url,
-                    }
-
-                    print_progress(i + 1, max_details, f"Fetching details for: {info['name']}", len(businesses))
-
-                    if info['href']:
-                        try:
-                            # Navigate directly to the detail URL
-                            page.goto(info['href'], timeout=25000, wait_until='domcontentloaded')
-                            time.sleep(2)
-
-                            details = extract_details_from_page(page)
-
-                            if details.get('phone'):
-                                biz['phone'] = details['phone']
-                            if details.get('website'):
-                                biz['website'] = details['website']
-                            if details.get('address'):
-                                biz['address'] = details['address']
-                            if details.get('category'):
-                                biz['category'] = details['category']
-                            if details.get('rating'):
-                                biz['rating'] = details['rating']
-                            if details.get('reviews_count'):
-                                biz['reviews_count'] = details['reviews_count']
-                            if details.get('email'):
-                                biz['email'] = details['email']
-
-                        except Exception:
-                            pass
-                    else:
-                        # No detail URL, skip
-                        pass
-
-                    businesses.append(biz)
-            else:
-                # No detail fetching, just create basic entries
-                for info in card_info:
-                    businesses.append({
-                        'name': info['name'],
-                        'address': '',
-                        'phone': '',
-                        'website': '',
-                        'rating': '',
-                        'reviews_count': '',
-                        'category': '',
-                        'email': '',
-                        'source': 'Google Maps',
-                        'source_url': url,
-                    })
-
-            # Step 4: Visit business websites to find emails
-            website_email_count = 0
-            max_website_visits = max(15, max_results // 2)  # Scale with requested results
-
-            for i, biz in enumerate(businesses):
-                if biz['email']:
-                    continue
-                if not biz['website']:
-                    continue
-                if website_email_count >= max_website_visits:
-                    break
-
-                print_progress(len(businesses) + i, len(businesses) * 2,
-                               f"Looking for email on: {biz['website']}", len(businesses))
-
-                try:
-                    website_emails = fetch_website_emails(biz['website'])
-                    if website_emails:
-                        biz['email'] = website_emails[0]
-                except:
-                    pass
-
-                website_email_count += 1
-                time.sleep(0.3)
-
-            # Step 5: Calculate priority scores
-            for biz in businesses:
-                score = 0
-                if biz.get('email'):
-                    score += 100
-                if biz.get('phone'):
-                    score += 50
-                if biz.get('website'):
-                    score += 10
-                if biz.get('address'):
-                    score += 5
-                biz['priority_score'] = score
-
-            # Sort by score (highest first)
-            businesses.sort(key=lambda x: x.get('priority_score', 0), reverse=True)
-
-            print_progress(100, 100, "Scraping complete!", len(businesses))
-
             browser.close()
-
+            p.stop()
             result = {
                 'success': True,
                 'query': query,
-                'results_count': len(businesses),
-                'results': businesses,
+                'results_count': 0,
+                'results': [],
+                'message': 'No business listings found on the search page.',
             }
             print_result(result)
             return result
 
-        except Exception as e:
+        # Step 2: Collect all card info (names and detail URLs) BEFORE navigating away
+        card_info = []
+        for card in cards[:max_results]:
+            name_el = card.query_selector('div.qBF1Pd, .fontHeadlineSmall')
+            name = name_el.inner_text().strip() if name_el else ''
+
+            if not name:
+                aria = card.get_attribute('aria-label') or ''
+                if aria:
+                    name = clean_text(aria)
+
+            if not name:
+                continue
+
+            # Get the detail page link (a.hfpxzc is the main card link)
+            link_el = card.query_selector('a.hfpxzc')
+            href = link_el.get_attribute('href') if link_el else ''
+
+            # Also try any link with /maps/place/
+            if not href:
+                link_el = card.query_selector('a[href*="/maps/place/"]')
+                href = link_el.get_attribute('href') if link_el else ''
+
+            card_info.append({
+                'name': name,
+                'href': href,
+            })
+
+        _progress(15, max_results, f"Found {len(card_info)} businesses, fetching details...", len(card_info))
+
+        # Step 3: Navigate to each detail URL and extract data
+        businesses = []
+        total = len(card_info)
+
+        if fetch_details and card_info:
+            max_details = min(total, max_results)
+
+            for i, info in enumerate(card_info[:max_details]):
+                # Check if shutdown was requested
+                if _shutdown_requested:
+                    break
+
+                biz = {
+                    'name': info['name'],
+                    'address': '',
+                    'phone': '',
+                    'website': '',
+                    'rating': '',
+                    'reviews_count': '',
+                    'category': '',
+                    'email': '',
+                    'source': 'Google Maps',
+                    'source_url': url,
+                }
+
+                _progress(i + 1, max_details, f"Fetching details for: {info['name']}", len(businesses))
+
+                if info['href']:
+                    try:
+                        # Navigate directly to the detail URL
+                        page.goto(info['href'], timeout=25000, wait_until='domcontentloaded')
+                        time.sleep(2)
+
+                        details = extract_details_from_page(page)
+
+                        if details.get('phone'):
+                            biz['phone'] = details['phone']
+                        if details.get('website'):
+                            biz['website'] = details['website']
+                        if details.get('address'):
+                            biz['address'] = details['address']
+                        if details.get('category'):
+                            biz['category'] = details['category']
+                        if details.get('rating'):
+                            biz['rating'] = details['rating']
+                        if details.get('reviews_count'):
+                            biz['reviews_count'] = details['reviews_count']
+                        if details.get('email'):
+                            biz['email'] = details['email']
+
+                    except Exception:
+                        pass
+                else:
+                    # No detail URL, skip
+                    pass
+
+                businesses.append(biz)
+        else:
+            # No detail fetching, just create basic entries
+            for info in card_info:
+                businesses.append({
+                    'name': info['name'],
+                    'address': '',
+                    'phone': '',
+                    'website': '',
+                    'rating': '',
+                    'reviews_count': '',
+                    'category': '',
+                    'email': '',
+                    'source': 'Google Maps',
+                    'source_url': url,
+                })
+
+        # Step 4: Visit business websites to find emails
+        website_email_count = 0
+        max_website_visits = max(15, max_results // 2)  # Scale with requested results
+
+        for i, biz in enumerate(businesses):
+            if biz['email']:
+                continue
+            if not biz['website']:
+                continue
+            if website_email_count >= max_website_visits:
+                break
+
+            _progress(len(businesses) + i, len(businesses) * 2,
+                      f"Looking for email on: {biz['website']}", len(businesses))
+
+            try:
+                website_emails = fetch_website_emails(biz['website'])
+                if website_emails:
+                    biz['email'] = website_emails[0]
+            except:
+                pass
+
+            website_email_count += 1
+            time.sleep(0.3)
+
+        # Step 5: Calculate priority scores
+        for biz in businesses:
+            score = 0
+            if biz.get('email'):
+                score += 100
+            if biz.get('phone'):
+                score += 50
+            if biz.get('website'):
+                score += 10
+            if biz.get('address'):
+                score += 5
+            biz['priority_score'] = score
+
+        # Sort by score (highest first)
+        businesses.sort(key=lambda x: x.get('priority_score', 0), reverse=True)
+
+        _progress(100, 100, "Scraping complete!", len(businesses))
+
+        browser.close()
+        p.stop()
+
+        result = {
+            'success': True,
+            'query': query,
+            'results_count': len(businesses),
+            'results': businesses,
+        }
+        print_result(result)
+        return result
+
+    except Exception as e:
+        try:
             browser.close()
-            result = {
-                'success': False,
-                'query': query,
-                'error': str(e),
-                'results': [],
-            }
-            print_result(result)
-            return result
+        except:
+            pass
+        try:
+            p.stop()
+        except:
+            pass
+        result = {
+            'success': False,
+            'query': query,
+            'error': str(e),
+            'results': [],
+        }
+        print_result(result)
+        return result
 
 
 def main():

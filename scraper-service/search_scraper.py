@@ -21,7 +21,7 @@ from scrapling.fetchers import Fetcher, StealthyFetcher, DynamicFetcher
 from generic_scraper import extract_emails, extract_phones, extract_addresses, extract_social_links
 
 
-def scrape_search_engine(query, max_pages=5, fetcher_type='stealthy'):
+def scrape_search_engine(query, max_pages=5, fetcher_type='stealthy', progress_callback=None):
     """
     Scrape search engine results and extract contact data from result pages.
     
@@ -37,6 +37,13 @@ def scrape_search_engine(query, max_pages=5, fetcher_type='stealthy'):
     all_emails = []
     all_phones = []
     all_social_links = {}
+
+    def _report_progress(progress, message, detail_count=0):
+        if progress_callback:
+            try:
+                progress_callback(progress, message, detail_count)
+            except Exception:
+                pass
     
     try:
         # Search Google

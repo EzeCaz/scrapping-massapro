@@ -67,36 +67,8 @@ class JobStatus(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Scraper runners  (run in thread pool so they don't block the event loop)
-# ---------------------------------------------------------------------------
-
-def _run_google_maps(query: str, max_results: int, fetcher: str, fetch_details: bool) -> dict:
-    """Run the Google Maps scraper synchronously and return the result dict."""
-    from google_maps_scraper import scrape_google_maps
-    result = scrape_google_maps(query, max_results, fetcher, fetch_details)
-    return result
-
-
-def _run_generic(url: str, depth: int, fetcher: str) -> dict:
-    """Run the generic scraper synchronously and return the result dict."""
-    from generic_scraper import scrape_generic
-    result = scrape_generic(url, depth, fetcher)
-    return result
-
-
-def _run_search(query: str, max_pages: int, fetcher: str) -> dict:
-    """Run the search scraper synchronously and return the result dict."""
-    from search_scraper import scrape_search_engine
-    result = scrape_search_engine(query, max_pages, fetcher)
-    return result
-
-
-# ---------------------------------------------------------------------------
 # Progress callback – updates the job in real-time
 # ---------------------------------------------------------------------------
-
-_progress_callbacks: dict = {}  # job_id -> callback
-
 
 def _make_progress_callback(job_id: str):
     """Return a callback that updates the job's progress fields."""
@@ -110,8 +82,36 @@ def _make_progress_callback(job_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Scraper runners  (run in thread pool so they don't block the event loop)
+# ---------------------------------------------------------------------------
+
+def _run_google_maps(query: str, max_results: int, fetcher: str, fetch_details: bool, progress_callback=None) -> dict:
+    """Run the Google Maps scraper synchronously and return the result dict."""
+    from google_maps_scraper import scrape_google_maps
+    result = scrape_google_maps(query, max_results, fetcher, fetch_details, progress_callback=progress_callback)
+    return result
+
+
+def _run_generic(url: str, depth: int, fetcher: str, progress_callback=None) -> dict:
+    """Run the generic scraper synchronously and return the result dict."""
+    from generic_scraper import scrape_generic
+    result = scrape_generic(url, depth, fetcher, progress_callback=progress_callback)
+    return result
+
+
+def _run_search(query: str, max_pages: int, fetcher: str, progress_callback=None) -> dict:
+    """Run the search scraper synchronously and return the result dict."""
+    from search_scraper import scrape_search_engine
+    result = scrape_search_engine(query, max_pages, fetcher, progress_callback=progress_callback)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Background task runner
 # ---------------------------------------------------------------------------
+
+# Maximum time a scraper is allowed to run before we mark it as timed out
+MAX_SCRAPER_RUNTIME_SECONDS = 600  # 10 minutes
 
 async def _run_scraper_job(job_id: str, req: ScrapeRequest):
     """Execute the appropriate scraper in a thread and update the job store."""
@@ -122,36 +122,50 @@ async def _run_scraper_job(job_id: str, req: ScrapeRequest):
     job["status"] = "running"
     job["message"] = "Starting scraper..."
 
+    progress_cb = _make_progress_callback(job_id)
+
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             if req.type == "google-maps":
-                result = await loop.run_in_executor(
+                future = loop.run_in_executor(
                     pool,
                     _run_google_maps,
                     req.query,
                     req.maxResults or 20,
                     req.fetcher or "dynamic",
                     req.fetchDetails if req.fetchDetails is not None else True,
+                    progress_cb,
                 )
             elif req.type == "generic":
-                result = await loop.run_in_executor(
+                future = loop.run_in_executor(
                     pool,
                     _run_generic,
                     req.url,
                     req.depth or 0,
                     req.fetcher or "stealthy",
+                    progress_cb,
                 )
             elif req.type == "search":
-                result = await loop.run_in_executor(
+                future = loop.run_in_executor(
                     pool,
                     _run_search,
                     req.query,
                     req.maxPages or 5,
                     req.fetcher or "stealthy",
+                    progress_cb,
                 )
             else:
                 job["status"] = "failed"
                 job["error"] = f"Invalid scrape type: {req.type}"
+                return
+
+            # Wait for the scraper with a timeout
+            try:
+                result = await asyncio.wait_for(future, timeout=MAX_SCRAPER_RUNTIME_SECONDS)
+            except asyncio.TimeoutError:
+                job["status"] = "failed"
+                job["error"] = f"Scraper timed out after {MAX_SCRAPER_RUNTIME_SECONDS // 60} minutes. This usually means Google Maps is blocking the request or Playwright couldn't launch. Try again or reduce the number of results."
+                job["message"] = "Scraping timed out"
                 return
 
         job["status"] = "completed" if result.get("success") else "failed"
@@ -164,6 +178,7 @@ async def _run_scraper_job(job_id: str, req: ScrapeRequest):
     except Exception as e:
         job["status"] = "failed"
         job["error"] = f"{type(e).__name__}: {str(e)}"
+        job["message"] = "Scraping failed"
         traceback.print_exc()
 
 
