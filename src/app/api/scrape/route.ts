@@ -1,9 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// Scraper service URL — deployed on Render separately from Vercel
-const SCRAPER_SERVICE_URL = process.env.SCRAPER_SERVICE_URL || '';
-const IS_VERCEL = !!(process.env.VERCEL || process.env.NOW_BUILDER);
-
 // In-memory job store for async scraping (fallback when scraper service is local)
 interface ScrapeJob {
   id: string;
@@ -64,6 +60,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // --- Read env vars at request time (NOT module level) ---
+    const SCRAPER_SERVICE_URL = process.env.SCRAPER_SERVICE_URL || '';
+    const IS_VERCEL = !!(process.env.VERCEL || process.env.NOW_BUILDER);
+
+    console.log(`[scrape] SCRAPER_SERVICE_URL: ${SCRAPER_SERVICE_URL || 'NOT SET'}`);
+    console.log(`[scrape] IS_VERCEL: ${IS_VERCEL}`);
+
     // --- Mode 1: Call remote scraper service (Vercel → Render) ---
     if (SCRAPER_SERVICE_URL) {
       // Step 1: Warmup ping — wake Render from sleep before the real request
@@ -122,21 +125,28 @@ export async function POST(request: NextRequest) {
       } catch (fetchErr) {
         console.error('[scrape] Remote service unavailable:', fetchErr instanceof Error ? fetchErr.message : String(fetchErr));
       }
+
+      // Remote service failed — on Vercel, return a clear error (no local fallback)
+      if (IS_VERCEL) {
+        return NextResponse.json({
+          success: false,
+          error: 'Scraper service is unavailable. This could mean:\n1. The scraper service on Render is still waking up (free tier sleeps after 15min). Please try again in 30 seconds.\n2. The scraper service crashed — check Render logs.',
+        }, { status: 503 });
+      }
+
+      // Not on Vercel — fall through to local subprocess fallback below
     } else {
-      console.log('[scrape] SCRAPER_SERVICE_URL not set');
+      // SCRAPER_SERVICE_URL is not set
+      if (IS_VERCEL) {
+        return NextResponse.json({
+          success: false,
+          error: 'SCRAPER_SERVICE_URL is not configured. Please set it in Vercel Settings → Environment Variables to your Render service URL (e.g. https://your-app.onrender.com).',
+        }, { status: 503 });
+      }
+      console.log('[scrape] SCRAPER_SERVICE_URL not set, using local subprocess');
     }
 
     // --- Mode 2: Local subprocess fallback (Z.AI container / dev mode only) ---
-    // On Vercel, there are no local scripts, so this will always fail.
-    // Skip local fallback on Vercel and return a clear error instead.
-    if (IS_VERCEL) {
-      return NextResponse.json({
-        success: false,
-        error: 'Scraper service is unavailable. This could mean:\n1. The scraper service on Render is still waking up (free tier sleeps after 15min). Please try again in 30 seconds.\n2. The SCRAPER_SERVICE_URL environment variable may not be set in Vercel.',
-      }, { status: 503 });
-    }
-
-    // Local subprocess mode (for Z.AI / dev only)
     const { spawn } = await import('child_process');
     const path = await import('path');
     const fs = await import('fs');
@@ -299,6 +309,9 @@ export async function GET(request: NextRequest) {
   if (!jobId) {
     return NextResponse.json({ success: false, error: 'jobId parameter is required' }, { status: 400 });
   }
+
+  // Read env at request time
+  const SCRAPER_SERVICE_URL = process.env.SCRAPER_SERVICE_URL || '';
 
   // Try local job store first
   const localJob = jobs.get(jobId);
