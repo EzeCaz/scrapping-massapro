@@ -17,10 +17,50 @@ let _prismaClient: PrismaClient | null = null
 function createPrismaClient(): PrismaClient {
   const databaseUrl = process.env.DATABASE_URL
   const authToken = process.env.DATABASE_AUTH_TOKEN
+  const isVercel = !!(process.env.VERCEL || process.env.NOW_BUILDER)
 
-  console.log(`[db] Initializing PrismaClient — DATABASE_URL is ${databaseUrl ? databaseUrl.substring(0, 20) + '...' : 'NOT SET'}`)
+  console.log(`[db] Initializing PrismaClient — env: ${isVercel ? 'Vercel' : 'local'}, DATABASE_URL: ${databaseUrl ? databaseUrl.substring(0, 25) + '...' : 'NOT SET'}`)
 
-  // Use Turso/libSQL if URL is provided and looks like a remote DB
+  // On Vercel: DATABASE_URL MUST be set to a libsql:// URL
+  if (isVercel) {
+    if (!databaseUrl || databaseUrl === 'undefined' || databaseUrl === 'file:./tmp.db') {
+      throw new Error(
+        'DATABASE_URL is not configured for production. ' +
+        'Please set DATABASE_URL and DATABASE_AUTH_TOKEN in your Vercel project settings (Settings → Environment Variables). ' +
+        'DATABASE_URL should be a libsql://... URL from your Turso database.'
+      )
+    }
+
+    if (!databaseUrl.startsWith('libsql://') && !databaseUrl.startsWith('http://') && !databaseUrl.startsWith('https://')) {
+      throw new Error(
+        `DATABASE_URL must start with libsql:// on Vercel. Got: ${databaseUrl.substring(0, 30)}... ` +
+        'Please check your Turso database URL in Vercel Environment Variables.'
+      )
+    }
+
+    const cleanAuthToken =
+      authToken && typeof authToken === 'string' && authToken !== 'undefined' && authToken.length > 0
+        ? authToken
+        : undefined
+
+    if (!cleanAuthToken) {
+      console.warn('[db] WARNING: DATABASE_AUTH_TOKEN is not set. This may cause authentication errors with Turso.')
+    }
+
+    try {
+      const libsql = createClient({
+        url: databaseUrl,
+        authToken: cleanAuthToken,
+      })
+      const adapter = new PrismaLibSql(libsql)
+      return new PrismaClient({ adapter } as any)
+    } catch (err) {
+      console.error('[db] Turso connection failed:', err)
+      throw err
+    }
+  }
+
+  // Local dev: Use Turso if configured, otherwise fall back to local SQLite
   if (
     databaseUrl &&
     typeof databaseUrl === 'string' &&
@@ -41,12 +81,11 @@ function createPrismaClient(): PrismaClient {
       const adapter = new PrismaLibSql(libsql)
       return new PrismaClient({ adapter } as any)
     } catch (err) {
-      console.error('[db] Turso connection failed:', err)
-      throw err
+      console.error('[db] Turso connection failed, falling back to SQLite:', err)
     }
   }
 
-  // Fallback: local SQLite (dev / build-time only)
+  // Fallback: local SQLite (dev only)
   console.log('[db] Using local SQLite fallback')
   return new PrismaClient()
 }
