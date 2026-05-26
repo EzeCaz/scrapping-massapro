@@ -66,6 +66,17 @@ export async function POST(request: NextRequest) {
 
     // --- Mode 1: Call remote scraper service (Vercel → Render) ---
     if (SCRAPER_SERVICE_URL) {
+      // Step 1: Warmup ping — wake Render from sleep before the real request
+      try {
+        console.log(`[scrape] Warming up Render service: ${SCRAPER_SERVICE_URL}/health`);
+        await fetch(`${SCRAPER_SERVICE_URL}/health`, {
+          signal: AbortSignal.timeout(30000), // 30s max for cold start
+        }).catch(() => {}); // Ignore errors — this is just a warmup
+      } catch {
+        // Warmup failed (service still waking), that's okay — the real request will wait
+      }
+
+      // Step 2: Send the actual scrape request
       console.log(`[scrape] Calling remote scraper service: ${SCRAPER_SERVICE_URL}/scrape`);
       try {
         const scraperRes = await fetch(`${SCRAPER_SERVICE_URL}/scrape`, {
@@ -81,7 +92,7 @@ export async function POST(request: NextRequest) {
             fetcher: fetcher || 'dynamic',
             fetchDetails: fetchDetails !== false,
           }),
-          signal: AbortSignal.timeout(60000), // 60s timeout (Render free tier needs ~30s cold start)
+          signal: AbortSignal.timeout(90000), // 90s timeout (30s warmup + 60s scrape)
         });
 
         if (scraperRes.ok) {

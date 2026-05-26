@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { getDb } from '@/lib/db';
 
 // GET /api/leads - Fetch all leads with optional filtering/sorting
 export async function GET(request: NextRequest) {
@@ -49,6 +49,7 @@ export async function GET(request: NextRequest) {
     else if (sortBy === 'createdAt') orderBy = { createdAt: orderDir };
     else if (sortBy === 'updatedAt') orderBy = { updatedAt: orderDir };
 
+    const db = getDb();
     const leads = await db.lead.findMany({
       where,
       orderBy,
@@ -80,6 +81,8 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    const db = getDb();
 
     // Check for duplicates by email+phone+name combination
     const created: any[] = [];
@@ -156,6 +159,7 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
+    const db = getDb();
     const result = await db.lead.deleteMany({
       where: {
         id: { in: ids },
@@ -188,6 +192,7 @@ export async function PATCH(request: NextRequest) {
       );
     }
 
+    const db = getDb();
     const lead = await db.lead.update({
       where: { id },
       data,
