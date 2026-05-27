@@ -8,8 +8,9 @@ Strategy:
 2. Collect card names and detail URLs from the search results
 3. Navigate to each detail URL directly (avoids card-click reshuffling)
 4. Extract phone, website, address from each detail page
-5. Visit business websites to find email addresses
-6. Score and prioritize results by email/phone availability
+5. For businesses missing email/phone: visit their website to find contact info
+6. Filter out results with no email AND no phone
+7. Score and prioritize: email (highest) > phone > website
 
 Usage:
   python google_maps_scraper.py --query "Hair salon in New York" --max-results 20 --fetcher dynamic --fetch-details
@@ -41,18 +42,16 @@ def handle_signal(signum, frame):
     global _shutdown_requested
     _shutdown_requested = True
     sig_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else f'Signal {signum}'
-    # Print error result immediately so the API can capture it
     result = {
         'success': False,
         'query': '',
-        'error': f'Scraper was interrupted by {sig_name}. This usually happens when the server restarts during scraping. Please try again.',
+        'error': f'Scraper was interrupted by {sig_name}. Please try again.',
         'results': [],
     }
     print_result(result)
-    sys.exit(130)  # 128 + SIGINT(2) = standard exit code for SIGINT
+    sys.exit(130)
 
 # Register signal handlers for graceful shutdown — only in the main thread
-# (When running via FastAPI ThreadPoolExecutor, we're in a worker thread, so skip)
 import threading
 if threading.current_thread() is threading.main_thread():
     signal.signal(signal.SIGINT, handle_signal)
@@ -70,6 +69,19 @@ BOOKING_PLATFORMS = [
     'salonlofts.com', 'thesalonbusiness.com', 'salontarget.com',
     'punchpass.com', 'zenplanner.com', 'tripadvisor.com',
     'yelp.com', 'opentable.com', 'groupon.com',
+    'doordash.com', 'ubereats.com', 'grubhub.com', 'postmates.com',
+    'seamless.com', 'foursquare.com', 'zomato.com',
+    'wix.com', 'squarespace.com', 'godaddy.com',
+    'facebook.com', 'instagram.com', 'twitter.com', 'x.com',
+    'linkedin.com', 'tiktok.com', 'youtube.com',
+]
+
+# Domains that are NOT real business websites (social, listing, etc.)
+NOT_REAL_WEBSITES = [
+    'facebook.com', 'instagram.com', 'twitter.com', 'x.com',
+    'linkedin.com', 'tiktok.com', 'youtube.com', 'goo.gl',
+    'bit.ly', 'tinyurl.com', 'google.com', 'g.page',
+    'maps.google.com', 'plus.google.com',
 ]
 
 
@@ -79,6 +91,14 @@ def is_booking_platform(url):
         return False
     url_lower = url.lower()
     return any(platform in url_lower for platform in BOOKING_PLATFORMS)
+
+
+def is_real_website(url):
+    """Check if a URL is a real business website (not social/listing)."""
+    if not url:
+        return False
+    url_lower = url.lower()
+    return not any(domain in url_lower for domain in NOT_REAL_WEBSITES)
 
 
 def extract_emails_from_html(html_text):
@@ -102,20 +122,88 @@ def extract_emails_from_html(html_text):
     for user, domain, tld in obfuscated:
         emails.add(f'{user}@{domain}.{tld}')
 
+    # Strategy 5: Emails with HTML entities
+    entity_emails = re.findall(r'([a-zA-Z0-9._%+-]+)&#64;([a-zA-Z0-9.-]+)\.([a-zA-Z]{2,})', html_text)
+    for user, domain, tld in entity_emails:
+        emails.add(f'{user}@{domain}.{tld}')
+
+    # Strategy 6: CF-encoded emails (Cloudflare __cf_email__)
+    cf_emails = re.findall(r'data-cfemail="([a-f0-9]+)"', html_text)
+    for hex_str in cf_emails:
+        try:
+            decoded = decode_cf_email(hex_str)
+            if decoded and '@' in decoded:
+                emails.add(decoded)
+        except:
+            pass
+
     # Filter out common false positives
     false_positives = {
         'example.com', 'test.com', 'email.com', 'domain.com',
         'yoursite.com', 'yourdomain.com', 'company.com',
         'sentry.io', 'wixpress.com', 'wix.com',
         'google.com', 'gmail.com', 'gstatic.com', 'googleapis.com',
+        'facebook.com', 'instagram.com', 'twitter.com',
+        'outlook.com', 'hotmail.com', 'yahoo.com',
+        'mailchimp.com', 'sendgrid.net', 'hubspot.com',
+        'wordpress.com', 'cloudflare.com', 'shopify.com',
     }
     filtered = set()
     for email in emails:
         domain = email.split('@')[1] if '@' in email else ''
-        if domain.lower() not in false_positives and not domain.endswith('.png') and not domain.endswith('.jpg'):
+        if (domain.lower() not in false_positives
+            and not domain.endswith('.png')
+            and not domain.endswith('.jpg')
+            and not domain.endswith('.svg')
+            and not domain.endswith('.css')
+            and len(email) < 80):
             filtered.add(email)
 
     return list(filtered)
+
+
+def decode_cf_email(hex_str):
+    """Decode Cloudflare-encoded email addresses."""
+    r = int(hex_str[:2], 16)
+    email = ''
+    for i in range(2, len(hex_str), 2):
+        email += chr(int(hex_str[i:i+2], 16) ^ r)
+    return email
+
+
+def extract_phones_from_html(html_text):
+    """Extract phone numbers from HTML source."""
+    phones = set()
+
+    # Strategy 1: tel: links
+    tel_matches = re.findall(r'href=["\']tel:([^"\']+)', html_text, re.IGNORECASE)
+    for tel in tel_matches:
+        formatted = format_phone(tel)
+        if formatted:
+            phones.add(formatted)
+
+    # Strategy 2: Various phone number formats in text
+    phone_patterns = [
+        r'\(\d{3}\)\s*\d{3}[-.\s]\d{4}',           # (XXX) XXX-XXXX
+        r'\d{3}[-.\s]\d{3}[-.\s]\d{4}',              # XXX-XXX-XXXX
+        r'\+1[-.\s]?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}',  # +1-XXX-XXX-XXXX
+        r'\+1[-.\s]?\d{3}[-.\s]?\d{3}[-.\s]?\d{4}',      # +1XXXXXXXXXX
+    ]
+    for pattern in phone_patterns:
+        matches = re.findall(pattern, html_text)
+        for m in matches:
+            formatted = format_phone(m)
+            if formatted:
+                phones.add(formatted)
+
+    # Strategy 3: aria-label or title with phone
+    aria_phones = re.findall(r'aria-label=["\'][^"\']*?(?:Phone|Tel|Call)[:\s]+([^"\']+)', html_text, re.IGNORECASE)
+    for ph in aria_phones:
+        formatted = format_phone(ph)
+        if formatted:
+            phones.add(formatted)
+
+    return list(phones)
 
 
 def clean_text(text):
@@ -129,13 +217,17 @@ def format_phone(phone_str):
     """Format a phone number string as (XXX) XXX-XXXX."""
     if not phone_str:
         return ''
-    phone_str = phone_str.replace('tel:', '').replace('TEL:', '').strip()
+    phone_str = phone_str.replace('tel:', '').replace('TEL:', '').replace('Tel:', '').strip()
+    # Remove common prefixes
+    phone_str = re.sub(r'^(Phone:\s*|Tel:\s*|Call:\s*)', '', phone_str, flags=re.IGNORECASE)
     digits = re.sub(r'\D', '', phone_str)
     if len(digits) == 11 and digits.startswith('1'):
         digits = digits[1:]
-    if len(digits) == 10:
+    if len(digits) == 10 and digits[0] in '23456789':
         return f'({digits[:3]}) {digits[3:6]}-{digits[6:]}'
-    return phone_str
+    if len(digits) >= 10:
+        return phone_str
+    return ''
 
 
 def print_progress(current, total, message, detail_count=0):
@@ -157,62 +249,100 @@ def print_result(result):
     print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
 
 
-def fetch_website_emails(website_url):
+def fetch_website_contact_info(website_url, playwright_browser=None):
     """
-    Visit a business's website to find email addresses.
+    Visit a business's website to find email addresses AND phone numbers.
     Tries the main page first, then common contact pages.
+    
+    Returns dict with 'emails' and 'phones' lists.
     """
+    result = {'emails': [], 'phones': []}
+
     if not website_url:
-        return []
+        return result
 
     if is_booking_platform(website_url):
-        return []
+        return result
+
+    # Ensure URL starts with http
+    if not website_url.startswith('http'):
+        website_url = 'https://' + website_url
 
     all_emails = set()
-    urls_to_try = [website_url]
+    all_phones = set()
 
+    # Build list of URLs to try: main page + contact pages
+    urls_to_try = [website_url]
     try:
         from urllib.parse import urlparse, urljoin
         base = website_url.rstrip('/')
+        # Common contact page paths
         urls_to_try.extend([
             base + '/contact',
             base + '/contact-us',
             base + '/about',
             base + '/about-us',
+            base + '/reach-us',
+            base + '/get-in-touch',
         ])
     except:
         pass
 
     visited = set()
-    for url in urls_to_try[:5]:
+    for url in urls_to_try[:6]:  # Try up to 6 pages
         if url in visited:
             continue
         visited.add(url)
 
         try:
-            page = Fetcher.get(url, stealthy_headers=True)
-            html_source = ''
-            try:
+            # Use Playwright for JS-heavy sites if browser is available
+            if playwright_browser:
+                try:
+                    ctx = playwright_browser.new_context(
+                        viewport={'width': 1280, 'height': 800},
+                        locale='en-US',
+                    )
+                    pg = ctx.new_page()
+                    pg.goto(url, timeout=12000, wait_until='domcontentloaded')
+                    time.sleep(1.5)
+                    html_source = pg.content()
+                    ctx.close()
+                except:
+                    # Fallback to simple fetcher
+                    page = Fetcher.get(url, stealthy_headers=True)
+                    html_source = page.html_content if hasattr(page, 'html_content') else str(page)
+            else:
+                page = Fetcher.get(url, stealthy_headers=True)
                 html_source = page.html_content if hasattr(page, 'html_content') else str(page)
-            except:
-                pass
 
             if html_source:
                 emails = extract_emails_from_html(html_source)
+                phones = extract_phones_from_html(html_source)
                 all_emails.update(emails)
+                all_phones.update(phones)
 
         except Exception:
             continue
 
-        if all_emails:
+        # If we found both email and phone, stop early
+        if all_emails and all_phones:
             break
+        # If we found email, we can stop (phone might come from next page)
+        if all_emails:
+            # Still try one more contact page for phone
+            continue
 
+    # Filter false positives for emails
     false_domains = {'example.com', 'test.com', 'email.com', 'domain.com', 'wix.com',
-                     'sentry.io', 'wixpress.com', 'google.com', 'facebook.com', 'instagram.com'}
-    filtered = [e for e in all_emails if e.split('@')[1].lower() not in false_domains
-                and not e.endswith('.png') and not e.endswith('.jpg')]
+                     'sentry.io', 'wixpress.com', 'google.com', 'facebook.com', 'instagram.com',
+                     'squarespace.com', 'godaddy.com', 'wordpress.com', 'cloudflare.com'}
+    result['emails'] = [e for e in all_emails
+                        if e.split('@')[1].lower() not in false_domains
+                        and not e.endswith('.png') and not e.endswith('.jpg')
+                        and not e.endswith('.svg') and not e.endswith('.css')]
+    result['phones'] = [p for p in all_phones if p]  # Remove empty strings
 
-    return filtered
+    return result
 
 
 def extract_details_from_page(page):
@@ -264,7 +394,7 @@ def extract_details_from_page(page):
         for el in website_links:
             href = el.get_attribute('href') or ''
             if href and href.startswith('http') and 'google.com' not in href:
-                if not is_booking_platform(href):
+                if not is_booking_platform(href) and is_real_website(href):
                     details['website'] = href
                     break
 
@@ -275,13 +405,12 @@ def extract_details_from_page(page):
                 text = section.inner_text().strip()
                 # Check if it looks like a domain (e.g. "shearblissnyc.com")
                 if re.match(r'^[a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z]{2,}(\.[a-zA-Z]{2,})?$', text):
-                    if not is_booking_platform(text):
+                    if not is_booking_platform(text) and is_real_website(text):
                         href = 'https://' + text if not text.startswith('http') else text
                         details['website'] = href
                         break
 
         # Extract address
-        # Strategy 1: div.Io6YTe with zip code
         info_sections = page.query_selector_all('div.Io6YTe')
         for section in info_sections:
             text = section.inner_text().strip()
@@ -289,7 +418,6 @@ def extract_details_from_page(page):
                 details['address'] = text
                 break
 
-        # Strategy 2: div.Io6YTe with address-like patterns (no zip but has street name)
         if not details['address']:
             addr_keywords = ['ave', 'st', 'blvd', 'dr', 'ln', 'rd', 'way', 'ct', 'pl',
                            'street', 'avenue', 'broadway', 'road']
@@ -301,7 +429,6 @@ def extract_details_from_page(page):
                         break
 
         # Extract category
-        # Google Maps shows category as a button (e.g., "Hair salon")
         category_buttons = page.query_selector_all('button[jsaction*="category"]')
         if category_buttons:
             for btn in category_buttons:
@@ -310,14 +437,15 @@ def extract_details_from_page(page):
                     details['category'] = text
                     break
 
-        # Fallback: try finding category from Io6YTe sections
         if not details['category']:
             for section in info_sections:
                 text = section.inner_text().strip()
                 if text and 2 < len(text) < 50:
                     if not re.search(r'\d{5}', text) and '.' not in text:
                         cat_words = ['salon', 'barber', 'restaurant', 'dentist', 'doctor', 'gym', 'spa',
-                                     'hotel', 'bakery', 'cafe', 'studio', 'shop', 'clinic', 'center']
+                                     'hotel', 'bakery', 'cafe', 'studio', 'shop', 'clinic', 'center',
+                                     'plumber', 'electrician', 'lawyer', 'accountant', 'realtor',
+                                     'contractor', 'mechanic', 'cleaner', 'trainer']
                         if any(w in text.lower() for w in cat_words):
                             details['category'] = text
                             break
@@ -353,18 +481,24 @@ def extract_details_from_page(page):
 def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_details=True, progress_callback=None):
     """
     Scrape Google Maps search results using Playwright.
-    Navigates directly to each business detail URL for accurate data.
+    
+    Prioritizes results with email > phone > website only.
+    Scrapes 3x the requested results to ensure enough quality leads after filtering.
+    Visits business websites to find missing email/phone.
+    Filters out results with NO email AND NO phone.
     
     Args:
         query: Search query string
-        max_results: Maximum number of results to return
+        max_results: Maximum number of results to RETURN (after filtering)
         fetcher_type: Type of fetcher (always uses Playwright for Google Maps)
         fetch_details: Whether to fetch detailed info for each result
-        progress_callback: Optional callback(progress:int, message:str, detail_count:int) 
-                          called during scraping to update job status
+        progress_callback: Optional callback(progress:int, message:str, detail_count:int)
     """
     encoded_query = query.replace(' ', '+')
     url = f'https://www.google.com/maps/search/{encoded_query}?hl=en&gl=us'
+
+    # Scrape 3x more results than requested to compensate for filtering
+    scrape_target = min(max_results * 3, 60)
 
     def _progress(current, total, message, detail_count=0):
         """Report progress via both stdout and callback."""
@@ -374,7 +508,7 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
                 pct = int((current / max(total, 1)) * 100)
                 progress_callback(pct, message, detail_count)
             except Exception:
-                pass  # Never let callback errors break the scraper
+                pass
 
     _progress(0, max_results, f"Fetching search results for: {query}")
 
@@ -398,7 +532,7 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
             return {
                 'success': False,
                 'query': query,
-                'error': f'Playwright Chromium is not installed on the server. Please run: playwright install chromium --with-deps. Original error: {error_msg}',
+                'error': f'Playwright Chromium is not installed. Original error: {error_msg}',
                 'results': [],
             }
         return {
@@ -429,11 +563,11 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
 
         _progress(10, max_results, "Loading search results...")
 
-        # Scroll to load more results if needed
+        # Scroll to load more results
         cards = page.query_selector_all('div.Nv2PK')
         scroll_attempts = 0
-        max_scroll_attempts = max(10, max_results // 3)  # Scale scrolling with requested results
-        while len(cards) < max_results and scroll_attempts < max_scroll_attempts:
+        max_scroll_attempts = max(15, scrape_target // 2)
+        while len(cards) < scrape_target and scroll_attempts < max_scroll_attempts:
             try:
                 feed = page.query_selector('div[role="feed"]')
                 if feed:
@@ -454,14 +588,11 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
             )
             if is_detail:
                 details = extract_details_from_page(page)
-
-                # Try to get name from h1
                 name = ''
                 h1 = page.query_selector('h1')
                 if h1:
                     name = h1.inner_text().strip()
                 if not name:
-                    # Try aria-label approach
                     for el in page.query_selector_all('[aria-label]'):
                         aria = el.get_attribute('aria-label') or ''
                         if aria and 3 < len(aria) < 80:
@@ -483,11 +614,13 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
                     'source_url': url,
                 }
 
-                if not business['email'] and business['website']:
+                if (not business['email'] or not business['phone']) and business['website']:
                     try:
-                        website_emails = fetch_website_emails(business['website'])
-                        if website_emails:
-                            business['email'] = website_emails[0]
+                        contact_info = fetch_website_contact_info(business['website'], playwright_browser=browser)
+                        if not business['email'] and contact_info['emails']:
+                            business['email'] = contact_info['emails'][0]
+                        if not business['phone'] and contact_info['phones']:
+                            business['phone'] = contact_info['phones'][0]
                     except:
                         pass
 
@@ -521,9 +654,9 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
             print_result(result)
             return result
 
-        # Step 2: Collect all card info (names and detail URLs) BEFORE navigating away
+        # Step 2: Collect all card info (names and detail URLs)
         card_info = []
-        for card in cards[:max_results]:
+        for card in cards[:scrape_target]:
             name_el = card.query_selector('div.qBF1Pd, .fontHeadlineSmall')
             name = name_el.inner_text().strip() if name_el else ''
 
@@ -535,11 +668,9 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
             if not name:
                 continue
 
-            # Get the detail page link (a.hfpxzc is the main card link)
             link_el = card.query_selector('a.hfpxzc')
             href = link_el.get_attribute('href') if link_el else ''
 
-            # Also try any link with /maps/place/
             if not href:
                 link_el = card.query_selector('a[href*="/maps/place/"]')
                 href = link_el.get_attribute('href') if link_el else ''
@@ -556,10 +687,9 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
         total = len(card_info)
 
         if fetch_details and card_info:
-            max_details = min(total, max_results)
+            max_details = min(total, scrape_target)
 
             for i, info in enumerate(card_info[:max_details]):
-                # Check if shutdown was requested
                 if _shutdown_requested:
                     break
 
@@ -576,11 +706,11 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
                     'source_url': url,
                 }
 
-                _progress(i + 1, max_details, f"Fetching details for: {info['name']}", len(businesses))
+                pct = int(15 + (i / max_details) * 50)  # 15-65% range
+                _progress(pct, max_results, f"Fetching details for: {info['name']}", len(businesses))
 
                 if info['href']:
                     try:
-                        # Navigate directly to the detail URL
                         page.goto(info['href'], timeout=25000, wait_until='domcontentloaded')
                         time.sleep(2)
 
@@ -603,53 +733,53 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
 
                     except Exception:
                         pass
-                else:
-                    # No detail URL, skip
-                    pass
 
                 businesses.append(biz)
         else:
-            # No detail fetching, just create basic entries
             for info in card_info:
                 businesses.append({
                     'name': info['name'],
-                    'address': '',
-                    'phone': '',
-                    'website': '',
-                    'rating': '',
-                    'reviews_count': '',
-                    'category': '',
-                    'email': '',
-                    'source': 'Google Maps',
-                    'source_url': url,
+                    'address': '', 'phone': '', 'website': '',
+                    'rating': '', 'reviews_count': '', 'category': '', 'email': '',
+                    'source': 'Google Maps', 'source_url': url,
                 })
 
-        # Step 4: Visit business websites to find emails
-        website_email_count = 0
-        max_website_visits = max(15, max_results // 2)  # Scale with requested results
-
+        # Step 4: Visit business websites for businesses missing email OR phone
+        # This is the critical step - we want to find email/phone from their website
+        websites_to_visit = []
         for i, biz in enumerate(businesses):
-            if biz['email']:
-                continue
-            if not biz['website']:
-                continue
-            if website_email_count >= max_website_visits:
+            has_email = bool(biz.get('email'))
+            has_phone = bool(biz.get('phone'))
+            has_website = bool(biz.get('website')) and is_real_website(biz.get('website', ''))
+            if (not has_email or not has_phone) and has_website:
+                websites_to_visit.append(i)
+
+        visited_count = 0
+        max_visits = min(len(websites_to_visit), 40)  # Limit total visits
+
+        for idx in websites_to_visit[:max_visits]:
+            if _shutdown_requested:
                 break
 
-            _progress(len(businesses) + i, len(businesses) * 2,
-                      f"Looking for email on: {biz['website']}", len(businesses))
+            biz = businesses[idx]
+            pct = int(65 + (visited_count / max_visits) * 25)  # 65-90% range
+            _progress(pct, max_results,
+                      f"Searching website for contact info: {biz['name']}", len(businesses))
 
             try:
-                website_emails = fetch_website_emails(biz['website'])
-                if website_emails:
-                    biz['email'] = website_emails[0]
+                contact_info = fetch_website_contact_info(biz['website'], playwright_browser=browser)
+                if not biz.get('email') and contact_info['emails']:
+                    biz['email'] = contact_info['emails'][0]
+                if not biz.get('phone') and contact_info['phones']:
+                    biz['phone'] = contact_info['phones'][0]
             except:
                 pass
 
-            website_email_count += 1
+            visited_count += 1
             time.sleep(0.3)
 
         # Step 5: Calculate priority scores
+        # Email = 100, Phone = 50, Website = 10, Address = 5
         for biz in businesses:
             score = 0
             if biz.get('email'):
@@ -662,10 +792,17 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
                 score += 5
             biz['priority_score'] = score
 
-        # Sort by score (highest first)
-        businesses.sort(key=lambda x: x.get('priority_score', 0), reverse=True)
+        # Step 6: Filter out results with NO email AND NO phone
+        quality_leads = [b for b in businesses if b.get('email') or b.get('phone')]
+        filtered_out = len(businesses) - len(quality_leads)
 
-        _progress(100, 100, "Scraping complete!", len(businesses))
+        # Step 7: Sort by priority score (highest first)
+        quality_leads.sort(key=lambda x: x.get('priority_score', 0), reverse=True)
+
+        # Step 8: Limit to requested number of results
+        final_results = quality_leads[:max_results]
+
+        _progress(100, 100, f"Scraping complete! {len(final_results)} quality leads found ({filtered_out} filtered out)", len(final_results))
 
         browser.close()
         p.stop()
@@ -673,8 +810,10 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
         result = {
             'success': True,
             'query': query,
-            'results_count': len(businesses),
-            'results': businesses,
+            'results_count': len(final_results),
+            'total_scraped': len(businesses),
+            'filtered_out': filtered_out,
+            'results': final_results,
         }
         print_result(result)
         return result
@@ -701,7 +840,7 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
 def main():
     parser = argparse.ArgumentParser(description='Google Maps Business Scraper')
     parser.add_argument('--query', required=True, help='Search query')
-    parser.add_argument('--max-results', type=int, default=20, help='Max results')
+    parser.add_argument('--max-results', type=int, default=20, help='Max results to return (after filtering)')
     parser.add_argument('--fetcher', default='dynamic', choices=['basic', 'stealthy', 'dynamic'], help='Fetcher type (always uses Playwright for accuracy)')
     parser.add_argument('--no-details', action='store_true', help='Skip detail page fetching (faster but less data)')
 
@@ -711,7 +850,6 @@ def main():
     try:
         scrape_google_maps(args.query, args.max_results, args.fetcher, fetch_details)
     except Exception as e:
-        # Catch any unhandled exceptions and print a proper error result
         error_msg = f'{type(e).__name__}: {str(e)}'
         traceback.print_exc(file=sys.stderr)
         result = {
