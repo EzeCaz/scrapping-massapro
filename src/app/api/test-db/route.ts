@@ -1,35 +1,45 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@libsql/client';
+import { PrismaClient } from '@prisma/client';
+import { PrismaLibSQL } from '@prisma/adapter-libsql';
 
 export async function GET() {
   const databaseUrl = process.env.DATABASE_URL;
   const authToken = process.env.DATABASE_AUTH_TOKEN;
   
-  if (!databaseUrl) {
-    return NextResponse.json({ error: 'DATABASE_URL not set' });
-  }
+  const results: any = { url: databaseUrl?.substring(0, 30) + '...', authSet: !!authToken };
   
+  // Test 1: Direct libsql
   try {
     const client = createClient({
-      url: databaseUrl,
+      url: databaseUrl!,
       authToken: authToken || undefined,
     });
-    
     const result = await client.execute('SELECT COUNT(*) as count FROM Lead');
-    const count = result.rows[0]?.count;
-    
-    return NextResponse.json({ 
-      success: true, 
-      leadCount: count,
-      url: databaseUrl.substring(0, 30) + '...',
-      authSet: !!authToken
-    });
+    results.directLibsql = { success: true, count: result.rows[0]?.count };
   } catch (err: any) {
-    return NextResponse.json({ 
-      error: err.message,
-      url: databaseUrl.substring(0, 30) + '...',
-      authSet: !!authToken,
-      stack: err.stack?.substring(0, 500)
-    });
+    results.directLibsql = { error: err.message };
   }
+  
+  // Test 2: Prisma with adapter (fresh instance, no caching)
+  try {
+    const libsql = createClient({
+      url: databaseUrl!,
+      authToken: authToken || undefined,
+    });
+    const adapter = new PrismaLibSQL(libsql);
+    const prisma = new PrismaClient({ adapter } as any);
+    
+    const leads = await prisma.lead.findMany({ take: 1 });
+    results.prismaWithAdapter = { success: true, count: leads.length };
+    await prisma.$disconnect();
+  } catch (err: any) {
+    results.prismaWithAdapter = { 
+      error: err.message,
+      errorType: err.constructor.name,
+      stack: err.stack?.substring(0, 300)
+    };
+  }
+  
+  return NextResponse.json(results);
 }
