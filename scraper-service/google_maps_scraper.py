@@ -289,7 +289,7 @@ def fetch_website_contact_info(website_url, playwright_browser=None):
         pass
 
     visited = set()
-    for url in urls_to_try[:6]:  # Try up to 6 pages
+    for url in urls_to_try[:4]:  # Try up to 4 pages (faster for Render free tier)
         if url in visited:
             continue
         visited.add(url)
@@ -498,7 +498,7 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
     url = f'https://www.google.com/maps/search/{encoded_query}?hl=en&gl=us'
 
     # Scrape 3x more results than requested to compensate for filtering
-    scrape_target = min(max_results * 3, 60)
+    scrape_target = min(max_results * 2, 40)
 
     def _progress(current, total, message, detail_count=0):
         """Report progress via both stdout and callback."""
@@ -755,7 +755,7 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
                 websites_to_visit.append(i)
 
         visited_count = 0
-        max_visits = min(len(websites_to_visit), 40)  # Limit total visits
+        max_visits = min(len(websites_to_visit), 20)  # Limit total visits for Render free tier
 
         for idx in websites_to_visit[:max_visits]:
             if _shutdown_requested:
