@@ -56,7 +56,7 @@ function createPrismaClient(): PrismaClient {
         authToken: cleanAuthToken,
       })
       const adapter = new PrismaLibSQL(libsql)
-      return new PrismaClient({ adapter, datasourceUrl: databaseUrl } as any)
+      return new PrismaClient({ adapter } as any)
     } catch (err) {
       console.error('[db] Turso connection failed:', err)
       throw err
@@ -82,7 +82,7 @@ function createPrismaClient(): PrismaClient {
         authToken: cleanAuthToken,
       })
       const adapter = new PrismaLibSQL(libsql)
-      return new PrismaClient({ adapter, datasourceUrl: databaseUrl } as any)
+      return new PrismaClient({ adapter } as any)
     } catch (err) {
       console.error('[db] Turso connection failed, falling back to SQLite:', err)
     }
@@ -103,11 +103,17 @@ export function getDb(): PrismaClient {
     return globalForPrisma.prisma
   }
 
+  // Always create fresh client in production to avoid stale cached instances
+  // Vercel serverless functions may cache module state across warm invocations
+  if (process.env.NODE_ENV === 'production') {
+    const client = createPrismaClient()
+    _prismaClient = client
+    return client
+  }
+
   if (!_prismaClient) {
     _prismaClient = createPrismaClient()
-    if (process.env.NODE_ENV !== 'production') {
-      globalForPrisma.prisma = _prismaClient
-    }
+    globalForPrisma.prisma = _prismaClient
   }
   return _prismaClient
 }
