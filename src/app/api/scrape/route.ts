@@ -61,6 +61,7 @@ export async function POST(request: NextRequest) {
     }
 
     // --- Read env vars at request time (NOT module level) ---
+    // Env vars: SCRAPER_SERVICE_URL, DATABASE_URL, DATABASE_AUTH_TOKEN
     const SCRAPER_SERVICE_URL = process.env.SCRAPER_SERVICE_URL || 'https://massascraper.onrender.com';
     const IS_VERCEL = !!(process.env.VERCEL || process.env.NOW_BUILDER);
 
