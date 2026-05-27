@@ -49,6 +49,9 @@ export async function GET(request: NextRequest) {
     else if (sortBy === 'createdAt') orderBy = { createdAt: orderDir };
     else if (sortBy === 'updatedAt') orderBy = { updatedAt: orderDir };
 
+    console.log("[leads] DATABASE_URL:", process.env.DATABASE_URL ? process.env.DATABASE_URL.substring(0, 30) + "..." : "NOT SET");
+    console.log("[leads] DATABASE_AUTH_TOKEN:", process.env.DATABASE_AUTH_TOKEN ? "SET (" + process.env.DATABASE_AUTH_TOKEN.length + " chars)" : "NOT SET");
+    console.log("[leads] VERCEL:", process.env.VERCEL || process.env.NOW_BUILDER || "NOT SET");
     const db = getDb();
     const leads = await db.lead.findMany({
       where,
