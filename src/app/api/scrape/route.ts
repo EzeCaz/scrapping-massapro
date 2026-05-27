@@ -61,7 +61,7 @@ export async function POST(request: NextRequest) {
     }
 
     // --- Read env vars at request time (NOT module level) ---
-    const SCRAPER_SERVICE_URL = process.env.SCRAPER_SERVICE_URL || '';
+    const SCRAPER_SERVICE_URL = process.env.SCRAPER_SERVICE_URL || 'https://massascraper.onrender.com';
     const IS_VERCEL = !!(process.env.VERCEL || process.env.NOW_BUILDER);
 
     console.log(`[scrape] SCRAPER_SERVICE_URL: ${SCRAPER_SERVICE_URL || 'NOT SET'}`);
@@ -311,7 +311,7 @@ export async function GET(request: NextRequest) {
   }
 
   // Read env at request time
-  const SCRAPER_SERVICE_URL = process.env.SCRAPER_SERVICE_URL || '';
+  const SCRAPER_SERVICE_URL = process.env.SCRAPER_SERVICE_URL || 'https://massascraper.onrender.com';
 
   // Try local job store first
   const localJob = jobs.get(jobId);
