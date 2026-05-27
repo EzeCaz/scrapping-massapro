@@ -56,7 +56,7 @@ function createPrismaClient(): PrismaClient {
         authToken: cleanAuthToken,
       })
       const adapter = new PrismaLibSQL(libsql)
-      return new PrismaClient({ adapter } as any)
+      return new PrismaClient({ adapter, datasourceUrl: databaseUrl } as any)
     } catch (err) {
       console.error('[db] Turso connection failed:', err)
       throw err
@@ -82,7 +82,7 @@ function createPrismaClient(): PrismaClient {
         authToken: cleanAuthToken,
       })
       const adapter = new PrismaLibSQL(libsql)
-      return new PrismaClient({ adapter } as any)
+      return new PrismaClient({ adapter, datasourceUrl: databaseUrl } as any)
     } catch (err) {
       console.error('[db] Turso connection failed, falling back to SQLite:', err)
     }
