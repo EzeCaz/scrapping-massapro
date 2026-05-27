@@ -67,17 +67,9 @@ export async function GET(request: NextRequest) {
     console.error('Error fetching leads:', error);
     const message = error instanceof Error ? error.message : 'Unknown error';
     // Provide helpful context for the most common misconfiguration
-    if (message.includes('URL_INVALID') || message.includes('undefined')) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Database is not configured. Please set DATABASE_URL and DATABASE_AUTH_TOKEN in Vercel Settings → Environment Variables. DATABASE_URL should be your Turso libsql:// URL.',
-        },
-        { status: 500 }
-      );
-    }
+    // Always return the actual error for debugging
     return NextResponse.json(
-      { success: false, error: message },
+      { success: false, error: message, errorType: error instanceof Error ? error.constructor.name : 'Unknown' },
       { status: 500 }
     );
   }
@@ -155,17 +147,9 @@ export async function POST(request: NextRequest) {
     console.error('Error creating leads:', error);
     const message = error instanceof Error ? error.message : 'Unknown error';
     // Provide helpful context for the most common misconfiguration
-    if (message.includes('URL_INVALID') || message.includes('undefined')) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Database is not configured. Please set DATABASE_URL and DATABASE_AUTH_TOKEN in Vercel Settings → Environment Variables. DATABASE_URL should be your Turso libsql:// URL.',
-        },
-        { status: 500 }
-      );
-    }
+    // Always return the actual error for debugging
     return NextResponse.json(
-      { success: false, error: message },
+      { success: false, error: message, errorType: error instanceof Error ? error.constructor.name : 'Unknown' },
       { status: 500 }
     );
   }
@@ -198,15 +182,8 @@ export async function DELETE(request: NextRequest) {
   } catch (error) {
     console.error('Error deleting leads:', error);
     const message = error instanceof Error ? error.message : 'Unknown error';
-    if (message.includes('URL_INVALID') || message.includes('undefined')) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Database is not configured. Please set DATABASE_URL and DATABASE_AUTH_TOKEN in Vercel Settings → Environment Variables.',
-        },
-        { status: 500 }
-      );
-    }
+    // Show actual error for debugging
+    console.error('[leads] Full error:', error);
     return NextResponse.json(
       { success: false, error: message },
       { status: 500 }
@@ -240,15 +217,8 @@ export async function PATCH(request: NextRequest) {
   } catch (error) {
     console.error('Error updating lead:', error);
     const message = error instanceof Error ? error.message : 'Unknown error';
-    if (message.includes('URL_INVALID') || message.includes('undefined')) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Database is not configured. Please set DATABASE_URL and DATABASE_AUTH_TOKEN in Vercel Settings → Environment Variables.',
-        },
-        { status: 500 }
-      );
-    }
+    // Show actual error for debugging
+    console.error('[leads] Full error:', error);
     return NextResponse.json(
       { success: false, error: message },
       { status: 500 }
