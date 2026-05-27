@@ -20,6 +20,9 @@ function createPrismaClient(): PrismaClient {
   const isVercel = !!(process.env.VERCEL || process.env.NOW_BUILDER)
 
   console.log(`[db] Initializing PrismaClient — env: ${isVercel ? 'Vercel' : 'local'}, DATABASE_URL: ${databaseUrl ? databaseUrl.substring(0, 25) + '...' : 'NOT SET'}`)
+  console.log(`[db] AUTH_TOKEN: ${authToken ? 'SET (' + authToken.length + ' chars)' : 'NOT SET'}`)
+  console.log(`[db] VERCEL: ${process.env.VERCEL || 'no'}, NOW_BUILDER: ${process.env.NOW_BUILDER || 'no'}`)
+  console.log(`[db] _prismaClient already exists: ${!!_prismaClient}`)
 
   // On Vercel: DATABASE_URL MUST be set to a libsql:// URL
   if (isVercel) {
