@@ -525,13 +525,8 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
                 '--disable-gpu',
                 '--disable-software-rasterizer',
                 '--disable-extensions',
-                '--disable-images',
-                '--disable-javascript-harmony-shipping',
                 '--no-zygote',
                 '--single-process',
-                '--reduce-memory-pressure',
-                '--mem-pressure-level-1',
-                '--js-flags="--max-old-space-size=256"',
             ],
         )
     except Exception as e:
