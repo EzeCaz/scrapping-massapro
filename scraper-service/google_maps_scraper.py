@@ -760,8 +760,21 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
                     'source': 'Google Maps', 'source_url': url,
                 })
 
+        # IMPORTANT: Close Playwright browser NOW to free ~300-500MB RAM
+        # before doing website visits (which use lightweight HTTP requests)
+        _progress(65, max_results, "Closing browser, preparing website visits...", len(businesses))
+        try:
+            browser.close()
+            p.stop()
+        except:
+            pass
+        
+        # Force garbage collection to free memory
+        import gc
+        gc.collect()
+
         # Step 4: Visit business websites for businesses missing email OR phone
-        # This is the critical step - we want to find email/phone from their website
+        # Using lightweight HTTP requests (not Playwright) to avoid OOM on Render
         websites_to_visit = []
         for i, biz in enumerate(businesses):
             has_email = bool(biz.get('email'))
@@ -783,7 +796,7 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
                       f"Searching website for contact info: {biz['name']}", len(businesses))
 
             try:
-                contact_info = fetch_website_contact_info(biz['website'], playwright_browser=browser)
+                contact_info = fetch_website_contact_info(biz['website'])
                 if not biz.get('email') and contact_info['emails']:
                     biz['email'] = contact_info['emails'][0]
                 if not biz.get('phone') and contact_info['phones']:
@@ -819,9 +832,6 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
         final_results = quality_leads[:max_results]
 
         _progress(100, 100, f"Scraping complete! {len(final_results)} quality leads found ({filtered_out} filtered out)", len(final_results))
-
-        browser.close()
-        p.stop()
 
         result = {
             'success': True,
