@@ -500,13 +500,16 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
     # Scrape 3x more results than requested to compensate for filtering
     scrape_target = min(max_results * 2, 40)
 
-    def _progress(current, total, message, detail_count=0):
-        """Report progress via both stdout and callback."""
-        print_progress(current, total, message, detail_count)
+    def _progress(pct, total, message, detail_count=0):
+        """Report progress via both stdout and callback.
+        pct: already-calculated percentage (0-100)
+        """
+        print_progress(pct, total, message, detail_count)
         if progress_callback:
             try:
-                pct = int((current / max(total, 1)) * 100)
-                progress_callback(pct, message, detail_count)
+                # pct is already 0-100, cap it
+                clamped = min(max(int(pct), 0), 100)
+                progress_callback(clamped, message, detail_count)
             except Exception:
                 pass
 
