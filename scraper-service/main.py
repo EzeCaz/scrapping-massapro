@@ -114,7 +114,7 @@ def _run_search(query: str, max_pages: int, fetcher: str, progress_callback=None
 # ---------------------------------------------------------------------------
 
 # Maximum time a scraper is allowed to run before we mark it as timed out
-MAX_SCRAPER_RUNTIME_SECONDS = 600  # 10 minutes
+MAX_SCRAPER_RUNTIME_SECONDS = 900  # 15 minutes (Google Maps + website visits can take a while)
 
 async def _run_scraper_job(job_id: str, req: ScrapeRequest):
     """Execute the appropriate scraper in a thread and update the job store."""

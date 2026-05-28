@@ -297,7 +297,7 @@ def fetch_website_contact_info(website_url, playwright_browser=None):
             # Use lightweight HTTP requests (not Playwright) to save memory on Render
             # Most business websites have contact info in the HTML source
             import requests as req
-            resp = req.get(url, timeout=10, headers={
+            resp = req.get(url, timeout=6, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.5',
@@ -495,8 +495,9 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
     encoded_query = query.replace(' ', '+')
     url = f'https://www.google.com/maps/search/{encoded_query}?hl=en&gl=us'
 
-    # Scrape 3x more results than requested to compensate for filtering
-    scrape_target = min(max_results * 2, 40)
+    # Scrape more results than requested to compensate for filtering
+    # But cap it to avoid timeouts on Render free tier
+    scrape_target = min(max_results + 5, 30)
 
     def _progress(pct, total, message, detail_count=0):
         """Report progress via both stdout and callback.
