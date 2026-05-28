@@ -496,8 +496,9 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
     url = f'https://www.google.com/maps/search/{encoded_query}?hl=en&gl=us'
 
     # Scrape more results than requested to compensate for filtering
-    # But cap it to avoid timeouts on Render free tier
-    scrape_target = min(max_results + 5, 30)
+    # But cap it to avoid OOM on Render free tier (512MB RAM)
+    # Keep it small - each Playwright page visit uses ~50-100MB
+    scrape_target = min(max_results + 3, 15)
 
     def _progress(pct, total, message, detail_count=0):
         """Report progress via both stdout and callback.
@@ -785,7 +786,7 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
                 websites_to_visit.append(i)
 
         visited_count = 0
-        max_visits = min(len(websites_to_visit), 20)  # Limit total visits for Render free tier
+        max_visits = min(len(websites_to_visit), 10)  # Limit to prevent OOM
 
         for idx in websites_to_visit[:max_visits]:
             if _shutdown_requested:
