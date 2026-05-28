@@ -722,7 +722,7 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
                     'source_url': url,
                 }
 
-                pct = int(15 + (i / max_details) * 50)  # 15-65% range
+                pct = min(int(15 + (i / max(1, max_details)) * 50), 65)  # 15-65% range, capped
                 _progress(pct, max_results, f"Fetching details for: {info['name']}", len(businesses))
 
                 if info['href']:
@@ -778,7 +778,7 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
                 break
 
             biz = businesses[idx]
-            pct = int(65 + (visited_count / max_visits) * 25)  # 65-90% range
+            pct = min(int(65 + (visited_count / max(1, max_visits)) * 25), 90)  # 65-90% range, capped
             _progress(pct, max_results,
                       f"Searching website for contact info: {biz['name']}", len(businesses))
 
