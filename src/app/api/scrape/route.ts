@@ -61,7 +61,6 @@ export async function POST(request: NextRequest) {
     }
 
     // --- Read env vars at request time (NOT module level) ---
-    // Env vars: SCRAPER_SERVICE_URL, DATABASE_URL, DATABASE_AUTH_TOKEN
     const SCRAPER_SERVICE_URL = process.env.SCRAPER_SERVICE_URL || 'https://massascraper.onrender.com';
     const IS_VERCEL = !!(process.env.VERCEL || process.env.NOW_BUILDER);
 
@@ -154,7 +153,12 @@ export async function POST(request: NextRequest) {
 
     const PROJECT_ROOT = process.env.PROJECT_ROOT || process.cwd();
     const PYTHON_PATH = process.env.PYTHON_PATH || path.join(PROJECT_ROOT, 'scrapling_env/bin/python3.12');
-    const SCRIPTS_DIR = process.env.SCRIPTS_DIR || path.join(PROJECT_ROOT, 'scraping-scripts');
+    // Check both 'scraper-service' and 'scraping-scripts' directory names
+    const SCRIPTS_DIR = process.env.SCRIPTS_DIR || (
+      fs.existsSync(path.join(PROJECT_ROOT, 'scraper-service'))
+        ? path.join(PROJECT_ROOT, 'scraper-service')
+        : path.join(PROJECT_ROOT, 'scraping-scripts')
+    );
 
     let scriptName: string;
     let args: string[];
