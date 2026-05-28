@@ -523,10 +523,7 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
-                '--disable-software-rasterizer',
                 '--disable-extensions',
-                '--no-zygote',
-                '--single-process',
             ],
         )
     except Exception as e:
