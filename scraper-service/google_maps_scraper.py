@@ -545,17 +545,33 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
     context = browser.new_context(
         viewport={'width': 1440, 'height': 900},
         locale='en-US',
+        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
     )
     page = context.new_page()
 
     try:
-        # Step 1: Navigate to search results
+        # Step 1: Navigate to search results — with retry logic
         _progress(5, max_results, "Loading Google Maps search page...")
-        page.goto(url, timeout=45000, wait_until='domcontentloaded')
+        
+        navigation_ok = False
+        for nav_attempt in range(3):
+            try:
+                page.goto(url, timeout=30000, wait_until='domcontentloaded')
+                navigation_ok = True
+                break
+            except Exception as nav_err:
+                if nav_attempt < 2:
+                    _progress(5, max_results, f"Navigation retry {nav_attempt + 2}/3...")
+                    time.sleep(3)
+                else:
+                    raise nav_err
+        
+        if not navigation_ok:
+            raise Exception('Failed to load Google Maps after 3 attempts')
 
         # Wait for business cards to appear
         try:
-            page.wait_for_selector('div.Nv2PK', timeout=20000)
+            page.wait_for_selector('div.Nv2PK', timeout=15000)
         except:
             pass
 
