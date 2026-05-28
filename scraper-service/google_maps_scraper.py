@@ -252,6 +252,7 @@ def print_result(result):
 def fetch_website_contact_info(website_url, playwright_browser=None):
     """
     Visit a business's website to find email addresses AND phone numbers.
+    Uses lightweight HTTP requests (not Playwright) to save memory on Render.
     Tries the main page first, then common contact pages.
     
     Returns dict with 'emails' and 'phones' lists.
@@ -276,60 +277,57 @@ def fetch_website_contact_info(website_url, playwright_browser=None):
     try:
         from urllib.parse import urlparse, urljoin
         base = website_url.rstrip('/')
-        # Common contact page paths
+        # Common contact page paths — prioritize contact pages
         urls_to_try.extend([
             base + '/contact',
             base + '/contact-us',
             base + '/about',
             base + '/about-us',
-            base + '/reach-us',
-            base + '/get-in-touch',
         ])
     except:
         pass
 
     visited = set()
-    for url in urls_to_try[:4]:  # Try up to 4 pages (faster for Render free tier)
+    for url in urls_to_try[:3]:  # Try up to 3 pages to save time
         if url in visited:
             continue
         visited.add(url)
 
         try:
-            # Use Playwright for JS-heavy sites if browser is available
-            if playwright_browser:
-                try:
-                    ctx = playwright_browser.new_context(
-                        viewport={'width': 1280, 'height': 800},
-                        locale='en-US',
-                    )
-                    pg = ctx.new_page()
-                    pg.goto(url, timeout=12000, wait_until='domcontentloaded')
-                    time.sleep(1.5)
-                    html_source = pg.content()
-                    ctx.close()
-                except:
-                    # Fallback to simple fetcher
-                    page = Fetcher.get(url, stealthy_headers=True)
-                    html_source = page.html_content if hasattr(page, 'html_content') else str(page)
-            else:
-                page = Fetcher.get(url, stealthy_headers=True)
-                html_source = page.html_content if hasattr(page, 'html_content') else str(page)
-
-            if html_source:
+            # Use lightweight HTTP requests (not Playwright) to save memory on Render
+            # Most business websites have contact info in the HTML source
+            import requests as req
+            resp = req.get(url, timeout=10, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+            }, allow_redirects=True)
+            
+            if resp.status_code == 200 and 'text/html' in resp.headers.get('content-type', ''):
+                html_source = resp.text
                 emails = extract_emails_from_html(html_source)
                 phones = extract_phones_from_html(html_source)
                 all_emails.update(emails)
                 all_phones.update(phones)
 
         except Exception:
-            continue
+            # Fallback: try scrapling Fetcher
+            try:
+                page = Fetcher.get(url, stealthy_headers=True)
+                html_source = page.html_content if hasattr(page, 'html_content') else str(page)
+                if html_source:
+                    emails = extract_emails_from_html(html_source)
+                    phones = extract_phones_from_html(html_source)
+                    all_emails.update(emails)
+                    all_phones.update(phones)
+            except Exception:
+                continue
 
         # If we found both email and phone, stop early
         if all_emails and all_phones:
             break
-        # If we found email, we can stop (phone might come from next page)
+        # If we found email, try one more contact page for phone
         if all_emails:
-            # Still try one more contact page for phone
             continue
 
     # Filter false positives for emails
@@ -525,8 +523,15 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
-                '--single-process',
+                '--disable-software-rasterizer',
+                '--disable-extensions',
+                '--disable-images',
+                '--disable-javascript-harmony-shipping',
                 '--no-zygote',
+                '--single-process',
+                '--reduce-memory-pressure',
+                '--mem-pressure-level-1',
+                '--js-flags="--max-old-space-size=256"',
             ],
         )
     except Exception as e:
@@ -730,8 +735,8 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
 
                 if info['href']:
                     try:
-                        page.goto(info['href'], timeout=25000, wait_until='domcontentloaded')
-                        time.sleep(2)
+                        page.goto(info['href'], timeout=20000, wait_until='domcontentloaded')
+                        time.sleep(1.5)  # Shorter wait to reduce total time
 
                         details = extract_details_from_page(page)
 
