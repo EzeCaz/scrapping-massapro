@@ -495,10 +495,12 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
     encoded_query = query.replace(' ', '+')
     url = f'https://www.google.com/maps/search/{encoded_query}?hl=en&gl=us'
 
-    # Scrape more results than requested to compensate for filtering
-    # But cap it to avoid OOM on Render free tier (512MB RAM)
-    # Keep it small - each Playwright page visit uses ~50-100MB
-    scrape_target = min(max_results + 3, 15)
+    # Scrape MORE results than requested to compensate for filtering.
+    # On Google Maps, many results lack email/phone, so we need 2-3x the target.
+    # Render free tier has 512MB RAM — each detail page visit uses ~50-80MB,
+    # but we close the browser before website visits, so we can afford more detail visits.
+    # For 20 requested results, we scrape 40 cards → get ~25-30 with details → filter to ~15-20 quality leads.
+    scrape_target = max(max_results * 2, 30)
 
     def _progress(pct, total, message, detail_count=0):
         """Report progress via both stdout and callback.
@@ -581,22 +583,70 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
 
         _progress(10, max_results, "Loading search results...")
 
-        # Scroll to load more results
+        # Handle Google cookie consent dialog (common in EU/EEA)
+        try:
+            consent_btn = page.query_selector('button[aria-label*="Accept"], button[aria-label*="accept"], button[aria-label*="Agree"], button[aria-label*="Reject all"]')
+            if consent_btn:
+                consent_btn.click()
+                time.sleep(1)
+        except:
+            pass
+
+        # Scroll to load more results — AGGRESSIVE scrolling to overcome Google Maps lazy-loading
+        # Google Maps initially loads only ~4-8 cards, we need to scroll a LOT to get more.
         cards = page.query_selector_all('div.Nv2PK')
         scroll_attempts = 0
-        max_scroll_attempts = max(15, scrape_target // 2)
+        max_scroll_attempts = scrape_target * 3  # Very aggressive: 90 scrolls for 30 target
+        no_new_cards_count = 0  # Track consecutive scrolls with no new cards
+        last_card_count = len(cards)
+
         while len(cards) < scrape_target and scroll_attempts < max_scroll_attempts:
             try:
+                # Strategy 1: Scroll the feed element (most reliable for Google Maps)
                 feed = page.query_selector('div[role="feed"]')
                 if feed:
-                    feed.evaluate('el => el.scrollTop = el.scrollHeight')
+                    # Use smooth scrolling with multiple small scrolls to trigger lazy-load observer
+                    feed.evaluate('el => { el.scrollBy({ top: 800, behavior: "smooth" }); }')
+                    time.sleep(0.6)
+                    feed.evaluate('el => { el.scrollBy({ top: 800, behavior: "smooth" }); }')
+                    time.sleep(0.6)
+                    # Jump to bottom to trigger lazy load
+                    feed.evaluate('el => { el.scrollTop = el.scrollHeight; }')
                 else:
+                    # Strategy 2: Keyboard-based scrolling
                     page.keyboard.press('End')
+                    time.sleep(0.3)
+                    page.keyboard.press('End')
+
+                # Strategy 3: Mouse wheel as additional trigger
+                try:
+                    page.mouse.wheel(0, 2000)
+                except:
+                    pass
             except:
                 page.keyboard.press('End')
-            time.sleep(1.5)
+
+            time.sleep(2.0)  # Give Google Maps time to render new cards
             cards = page.query_selector_all('div.Nv2PK')
             scroll_attempts += 1
+
+            # Track if we're making progress
+            if len(cards) == last_card_count:
+                no_new_cards_count += 1
+            else:
+                no_new_cards_count = 0
+                last_card_count = len(cards)
+
+            # If no new cards for 5 consecutive scrolls, we've likely reached the end
+            if no_new_cards_count >= 5:
+                _progress(15, max_results, f"No more results after {scroll_attempts} scrolls. Found {len(cards)} cards.", len(cards))
+                break
+
+            # Log progress periodically
+            if scroll_attempts % 5 == 0:
+                _progress(12, max_results, f"Scrolling... found {len(cards)} cards (attempt {scroll_attempts}/{max_scroll_attempts})", len(cards))
+
+        _progress(15, max_results, f"Found {len(cards)} business cards after scrolling. Processing...", len(cards))
 
         if not cards:
             # Check if we're on a single business page
@@ -673,8 +723,9 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
             return result
 
         # Step 2: Collect all card info (names and detail URLs)
+        # Process more cards than scrape_target since some may not have valid names/links
         card_info = []
-        for card in cards[:scrape_target]:
+        for card in cards[:scrape_target * 2]:
             name_el = card.query_selector('div.qBF1Pd, .fontHeadlineSmall')
             name = name_el.inner_text().strip() if name_el else ''
 
@@ -729,8 +780,8 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
 
                 if info['href']:
                     try:
-                        page.goto(info['href'], timeout=20000, wait_until='domcontentloaded')
-                        time.sleep(1.5)  # Shorter wait to reduce total time
+                        page.goto(info['href'], timeout=25000, wait_until='domcontentloaded')
+                        time.sleep(2)  # Wait for detail elements to fully render
 
                         details = extract_details_from_page(page)
 
@@ -786,7 +837,7 @@ def scrape_google_maps(query, max_results=20, fetcher_type='dynamic', fetch_deta
                 websites_to_visit.append(i)
 
         visited_count = 0
-        max_visits = min(len(websites_to_visit), 10)  # Limit to prevent OOM
+        max_visits = min(len(websites_to_visit), 15)  # Visit more websites to find missing email/phone
 
         for idx in websites_to_visit[:max_visits]:
             if _shutdown_requested:
